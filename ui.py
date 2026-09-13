@@ -200,6 +200,40 @@ def _pad(s, width=COLS):
     return s + ' ' * (width - len(s))
 
 
+def _img_native_size(data):
+    """(width, height) from a WebP or JPEG header, or None if unparseable.
+
+    The native decoders stretch to whatever target they're handed, so the
+    caller needs the source size to scale to fit *without* upscaling."""
+    try:
+        if len(data) >= 30 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            fmt = data[12:16]
+            if fmt == b'VP8 ':                       # lossy
+                return ((data[26] | (data[27] << 8)) & 0x3FFF,
+                        (data[28] | (data[29] << 8)) & 0x3FFF)
+            if fmt == b'VP8L' and data[20] == 0x2F:   # lossless
+                b = data[21] | (data[22] << 8) | (data[23] << 16) | (data[24] << 24)
+                return ((b & 0x3FFF) + 1, ((b >> 14) & 0x3FFF) + 1)
+            if fmt == b'VP8X':                        # extended
+                return (1 + (data[24] | (data[25] << 8) | (data[26] << 16)),
+                        1 + (data[27] | (data[28] << 8) | (data[29] << 16)))
+            return None
+        if len(data) >= 4 and data[0] == 0xFF and data[1] == 0xD8:   # JPEG
+            i, n = 2, len(data)
+            while i + 9 < n:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                m = data[i + 1]
+                if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):  # SOFn
+                    return ((data[i + 7] << 8) | data[i + 8],
+                            (data[i + 5] << 8) | data[i + 6])
+                i += 2 + ((data[i + 2] << 8) | data[i + 3])
+    except Exception:
+        pass
+    return None
+
+
 def _clamp(v, lo, hi):
     return lo if v < lo else (hi if v > hi else v)
 
@@ -1462,7 +1496,17 @@ class UI:
             else:
                 img["state"] = "failed"
                 return
-            w, h, buf = _dec.decode(data, box_w, box_h)
+            # The native decoder stretches to the exact target it's given, so
+            # scale to fit the viewport ourselves — preserving aspect ratio and
+            # never enlarging a small image past its native size.
+            nsz = _img_native_size(data)
+            if nsz:
+                nw, nh = nsz
+                scale = min(box_w / nw, box_h / nh, 1.0)
+                tw, th = max(1, int(nw * scale)), max(1, int(nh * scale))
+            else:
+                tw, th = box_w, box_h
+            w, h, buf = _dec.decode(data, tw, th)
             img["w"], img["h"], img["buf"], img["state"] = w, h, buf, "ready"
             self._img_lru_touch(li)
         except Exception:
