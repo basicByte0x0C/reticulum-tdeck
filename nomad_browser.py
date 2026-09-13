@@ -239,11 +239,12 @@ async def _fetch_task(dest_hash, path, push, keep_pos=False):
         await _fetch(dest_hash, path, push, keep_pos)
     except Exception as e:
         _status("error: " + str(e))
-    _fetching = False
-    _gui.transfer_progress = None
-    _gui.wake_screen()
-    _gui.dirty = True
-    gc.collect()
+    finally:
+        _fetching = False
+        _gui.transfer_progress = None
+        _gui.wake_screen()
+        _gui.dirty = True
+        gc.collect()
 
 
 async def _fetch(dest_hash, path, push, keep_pos=False):
@@ -339,7 +340,10 @@ async def _fetch(dest_hash, path, push, keep_pos=False):
 
 async def _fetch_image_task(src):
     """Click path: fetch a page image and open the full-screen viewer."""
-    data = await _fetch_image(src)
+    try:
+        data = await _fetch_image(src)
+    except Exception:
+        data = None
     if data is not None:
         _gui.view_page_image(data)
     _gui.dirty = True
@@ -365,6 +369,10 @@ async def _fetch_image(src):
         await asyncio.sleep_ms(100)              # (page or image - one _result channel)
     _fetching = True
     try:
+        # _link may have closed during the queue-wait above; re-check.
+        if _link is None or _link.status != OutgoingLink.ACTIVE:
+            _status("image: no link")
+            return None
         _status("loading image...")
         _result = None
         rid = _link.request("/media", data={"path": media_path},
@@ -400,7 +408,10 @@ def fetch_page_image(li, src):
 
 
 async def _auto_fetch_task(li, src):
-    data = await _fetch_image(src)
+    try:
+        data = await _fetch_image(src)
+    except Exception:
+        data = None
     _gui.page_image_loaded(li, data)
     _gui.dirty = True
     gc.collect()
