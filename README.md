@@ -21,7 +21,7 @@ Text displays in English as well as Bulgarian, Russian, Ukrainian and Belarusian
 
 <p>
 <img src="images/splash.jpeg" width="49%" alt="Splash screen"/>
-<img src="images/lxmf-list.jpeg" width="49%" alt="Messenger — LXMF peer list with MSG / NET / SSH tabs"/>
+<img src="images/lxmf-list.jpeg" width="49%" alt="Messenger — LXMF peer list with MSG / NET / RNSH tabs"/>
 </p>
 <p>
 <img src="images/nomadnet-reader.jpeg" width="49%" alt="NomadNet browser rendering a node page with block-glyph banner art"/>
@@ -229,18 +229,20 @@ mpremote cp tdeck_node.py :/main.py
 
 ### Node List Screen
 
-The device starts on the node list screen with three tabs: **MSG** (LXMF chat peers), **NET** (browsable NomadNet nodes), and **SSH** (rnsh shell listeners), all populated from announces. Peers with unread messages are marked with `*`. A NomadNet instance announces both aspects, so it appears in both MSG and NET — chattable in MSG, browsable in NET.
+The device starts on the node list screen with three tabs: **MSG** (LXMF chat peers), **NET** (browsable NomadNet nodes), and **RNSH** (rnsh shell listeners), all populated from announces. Peers with unread messages are marked with `*`. A NomadNet instance announces both aspects, so it appears in both MSG and NET — chattable in MSG, browsable in NET.
 
 | Action | Input |
 |---|---|
-| Switch MSG/NET/SSH tab | Trackball left/right (or `b`) |
+| Switch MSG/NET/RNSH tab | Trackball left/right (or `b`) |
 | Select peer/node | Trackball up/down |
 | Open chat / node page / shell | Trackball click (or Enter) |
-| Enter rnsh hash manually (SSH) | Press `m` |
+| Enter rnsh hash manually (RNSH) | Press `m` |
 | Send announce | Press `a` |
 | Open settings | Press `s` |
 | Ping selected peer (MSG) | Press `p` |
 | Delete selected peer/node | Press `d` |
+| Lock the device | Hold trackball click (0.7 s), anywhere |
+| Unlock the device | Any trackball click |
 
 Deleting a peer forgets its chat history and cached media locally; it
 re-appears on the next announce. When the peer list fills up (16 entries) the
@@ -273,9 +275,9 @@ re-fetching over LoRa.
 
 v1 limitations: read-only (form fields render as placeholders), pages are capped at 16 KB, and nodes that require identification will time out.
 
-### rnsh Shell (SSH tab)
+### rnsh Shell (RNSH tab)
 
-The SSH tab lists [rnsh](https://github.com/acehoss/rnsh) listeners heard via announces; press `m` to type a listener's 32-hex destination hash directly. Clicking one establishes an encrypted link, identifies your node, exchanges protocol versions, and starts the remote default shell on a pty. Output renders as a **scrolling text log** on a **53×16 grid** (see the font note below) — line-oriented commands (`ls -l`, `ps`, `git log`, `cat`) keep their column layout instead of wrapping; full-screen TUIs (`vim`, `htop`) won't render correctly (ANSI cursor addressing is stripped in this MVP). The listener must authorize your **identity hash** (shown at boot and on the SSH manual-entry screen) via its `-a` flag or `~/.config/rnsh/allowed_identities`, unless it runs `--no-auth`.
+The RNSH tab lists [rnsh](https://github.com/acehoss/rnsh) listeners heard via announces; press `m` to type a listener's 32-hex destination hash directly. Clicking one establishes an encrypted link, identifies your node, exchanges protocol versions, and starts the remote default shell on a pty. Output renders as a **scrolling text log** on a **53×16 grid** (see the font note below) — line-oriented commands (`ls -l`, `ps`, `git log`, `cat`) keep their column layout instead of wrapping; full-screen TUIs (`vim`, `htop`) won't render correctly (ANSI cursor addressing is stripped in this MVP). The listener must authorize your **identity hash** (shown at boot and on the RNSH manual-entry screen) via its `-a` flag or `~/.config/rnsh/allowed_identities`, unless it runs `--no-auth`.
 
 | Action | Input |
 |---|---|
@@ -399,13 +401,19 @@ Press `s` from the node list to open settings. Navigate with trackball, select w
 
 **Sleep** — Cycle the screen inactivity timeout (10 s / 30 s / 60 s / never). The screen never sleeps mid-transfer or mid-audio.
 
+**Wake** — What wakes the screen automatically: `msgs` (incoming messages only, the default), `all` (messages and peer announces — the pre-1.4 behaviour, keeps the screen lit on a busy mesh), or `never` (input only).
+
 Connecting to WiFi or a TCP server no longer freezes the UI — the screen shows `Connecting...` while the work runs in the background, then reports the result.
 
 All settings (WiFi credentials, TCP host/port, node name, TCP enabled state, volume, keyboard backlight, auto-announce, sleep timeout) are saved to `/rns/settings.json` and restored on boot. If WiFi and TCP were enabled when the device was last used, they reconnect automatically on startup.
 
 ### Screen Power-Off
 
-The screen turns off automatically after a configurable inactivity timeout (10 s default; set to 30 s / 60 s / never under Settings → Sleep) to save battery, and never sleeps while a page transfer or audio playback is in progress. Any keypress, trackball event, incoming message, or peer announce wakes the screen. The first input after wake is consumed (not processed) to prevent accidental actions. The MCU stays awake to receive LoRa packets — only the backlight is toggled. All SPI display writes are skipped while the screen is off, freeing the bus for LoRa.
+The screen turns off automatically after a configurable inactivity timeout (10 s default; set to 30 s / 60 s / never under Settings → Sleep) to save battery, and never sleeps while a page transfer or audio playback is in progress. Any keypress or trackball event wakes the screen; whether an incoming message or peer announce also wakes it follows the Settings → Wake policy (messages only by default). The first input after wake is consumed (not processed) to prevent accidental actions. The MCU stays awake to receive LoRa packets — only the backlight is toggled. All SPI display writes are skipped while the screen is off, freeing the bus for LoRa.
+
+### Screen Lock
+
+Holding the trackball click for 0.7 s locks the device from any screen: the screen blanks and every keypress and trackball event is dropped, including the wakes an incoming message or peer announce would normally trigger. The keyboard is still drained in the background so nothing queues up behind the lock. Notification sounds and unread counters keep working, and the radio keeps receiving — only the display and input are shut out. A single click unlocks and repaints — the ball is recessed enough that an accidental press is unlikely, and needing a 0.7 s hold just to see the screen reads as a stuck device. Locking is refused while a voice message is recording.
 
 ### Status Bar
 
