@@ -62,9 +62,15 @@ class FakeTFT:
     def fill(self, c):
         self.calls.append(("fill", c))
 
+    def blit_buffer(self, buf, x, y, w, h):
+        assert 0 <= x <= 320 and 0 <= y <= 240, (x, y)
+        self.calls.append(("blit", x, y, w, h))
 
-def _mkui():
+
+def _mkui(mono=False):
     tft = FakeTFT()
+    if mono:
+        tft.mono = True
     g = ui.UI(tft, object(), lambda: b"\x00", node_name="test")
     g._screen_on = True
     return g, tft
@@ -407,6 +413,151 @@ def test_browser_prev_next_and_paging():
     assert g.browser_scroll == max(0, len(lines2) - (ui.BODY_ROWS - 1))
     g._browser_goto(True)
     assert g.browser_scroll == 0
+
+
+def test_page_image_click_calls_follow_with_sentinel():
+    g, _ = _mkui(mono=True)              # placeholder path (Pro): marker stays a link
+    got = []
+    g.on_browse_follow = lambda url: got.append(url)
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/page/index.mu", lines, links)
+    g.draw()                             # populates _browser_link_rows (see test_cursor_and_link_follow)
+    g.browser_cursor = 0                 # cursor on the image marker row
+    g._browser_follow_cursor()
+    assert got == ["\x01:/media/logo.webp"]
+
+
+def test_image_block_expands_on_colour_tft():
+    g, _ = _mkui()  # colour TFT (no mono)
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    assert len(g.browser_lines) == ui.BODY_ROWS - 1     # full-viewport block
+    assert g._browser_image_rows.get(0) == (0, 0)
+    assert 0 in g._page_images
+    assert g._page_images[0]["src"] == ":/media/logo.webp"
+    assert g._page_images[0]["state"] == "idle"
+
+
+def test_image_block_not_expanded_on_mono():
+    g, _ = _mkui(mono=True)
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    assert len(g.browser_lines) == 1        # placeholder link row kept as-is
+    assert g._browser_image_rows == {}
+    assert g._page_images == {}
+
+
+def test_visible_image_triggers_fetch_once():
+    g, _ = _mkui()
+    fetched = []
+    g.on_fetch_page_image = lambda li, src: fetched.append((li, src))
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    g.draw()
+    g.draw()  # a second draw must NOT re-fetch (state left the idle bucket)
+    assert fetched == [(0, ":/media/logo.webp")]
+    assert g._page_images[0]["state"] == "loading"
+
+
+def test_failed_image_marks_state():
+    g, _ = _mkui()
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    g.page_image_loaded(0, None)
+    assert g._page_images[0]["state"] == "failed"
+    g.draw()  # must draw the failure placeholder without raising
+
+
+def test_image_fetch_fires_across_page_navigation():
+    # Regression: the image-row cache key must include _page_gen, or a second
+    # image page whose image lands at the same (li=0, subrow=0) collides with
+    # the first page's stale "idle" cache entry and never fetches.
+    g, _ = _mkui()  # colour TFT
+    fetched = []
+    g.on_fetch_page_image = lambda li, src: fetched.append(src)
+    for src in (":/media/a.webp", ":/media/b.webp"):
+        lines, links = micron.render("`(x`%s)" % src, 40)
+        g.show_page("n", "/p", lines, links)
+        g.draw()
+    assert fetched == [":/media/a.webp", ":/media/b.webp"], fetched
+
+
+def test_image_rows_redraw_fully_after_navigation():
+    # Tighter than the fetch-count check above. The image block shares one
+    # state dict across all its subrows, and that dict's mutation ordering
+    # can mask the missing-_page_gen bug: a later subrow's stale key happens
+    # to mismatch and still fires the fetch, even though row 0 itself (and
+    # most other rows) silently keep the PREVIOUS page's stale pixels and
+    # are never handed to _draw_image_row at all. Assert every subrow of
+    # the new page's image block is actually redrawn -- not just that some
+    # row, somewhere, eventually re-fetches.
+    g, _ = _mkui()  # colour TFT
+    drawn = []
+    orig = g._draw_image_row
+
+    def traced(li, subrow, y):
+        drawn.append(subrow)
+        return orig(li, subrow, y)
+
+    g._draw_image_row = traced
+    n = ui.BODY_ROWS - 1
+    for src in (":/media/a.webp", ":/media/b.webp"):
+        lines, links = micron.render("`(x`%s)" % src, 40)
+        g.show_page("n", "/p", lines, links)
+        drawn.clear()
+        g.draw()
+        assert sorted(drawn) == list(range(n)), (src, sorted(drawn))
+
+
+def test_ready_image_blits_strip():
+    g, tft = _mkui()
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    # simulate a decoded 120x80 image centred in the block
+    img = g._page_images[0]
+    img["state"] = "ready"; img["w"] = 120; img["h"] = 80
+    img["buf"] = bytes(120 * 80 * 2)
+    g.draw()
+    blits = [c for c in tft.calls if c[0] == "blit"]
+    assert blits, "expected at least one strip blit"
+    for _, x, y, w, h in blits:
+        assert w == 120 and 1 <= h <= ui.CHAR_H
+        assert x == (320 - 120) // 2
+
+
+def test_ready_image_does_not_blit_on_mono():
+    g, tft = _mkui(mono=True)   # e-ink keeps a placeholder, never a raster block
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    g.draw()
+    assert not any(c[0] == "blit" for c in tft.calls)
+
+
+def test_view_page_image_enters_viewer():
+    g, _ = _mkui()
+    g.state = ui.STATE_BROWSER
+    g.view_page_image(b"\xff\xd8fake")
+    assert g.state == ui.STATE_IMAGE
+    assert g._viewing_image == b"\xff\xd8fake"
+    assert g._prev_image_state == ui.STATE_BROWSER
+
+
+def test_exit_page_image_returns_to_browser():
+    g, _ = _mkui()
+    g.state = ui.STATE_BROWSER
+    g.view_page_image(b"x")
+    g._exit_image_view()
+    assert g.state == ui.STATE_BROWSER
+
+
+def test_exit_chat_image_still_returns_to_chat():
+    g, _ = _mkui()
+    g.state = ui.STATE_CHAT
+    g._prev_image_state = ui.STATE_CHAT
+    g._viewing_image = b"x"
+    g.state = ui.STATE_IMAGE
+    g._exit_image_view()
+    assert g.state == ui.STATE_CHAT
 
 
 def test_wifi_result_flow():

@@ -107,6 +107,8 @@ INPUT_SLOT = BODY_ROWS + 2
 SBAR_X = SCREEN_W - 3   # 317
 SBAR_W = 2
 
+IMG_GAP = 2   # px of breathing room top/bottom inside an inline image block
+
 # Voice recording
 REC_MAX_SECS = 15  # matches tdeck_node _rec_buf sizing
 
@@ -196,6 +198,40 @@ def _pad(s, width=COLS):
     if len(s) >= width:
         return s[:width]
     return s + ' ' * (width - len(s))
+
+
+def _img_native_size(data):
+    """(width, height) from a WebP or JPEG header, or None if unparseable.
+
+    The native decoders stretch to whatever target they're handed, so the
+    caller needs the source size to scale to fit *without* upscaling."""
+    try:
+        if len(data) >= 30 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            fmt = data[12:16]
+            if fmt == b'VP8 ':                       # lossy
+                return ((data[26] | (data[27] << 8)) & 0x3FFF,
+                        (data[28] | (data[29] << 8)) & 0x3FFF)
+            if fmt == b'VP8L' and data[20] == 0x2F:   # lossless
+                b = data[21] | (data[22] << 8) | (data[23] << 16) | (data[24] << 24)
+                return ((b & 0x3FFF) + 1, ((b >> 14) & 0x3FFF) + 1)
+            if fmt == b'VP8X':                        # extended
+                return (1 + (data[24] | (data[25] << 8) | (data[26] << 16)),
+                        1 + (data[27] | (data[28] << 8) | (data[29] << 16)))
+            return None
+        if len(data) >= 4 and data[0] == 0xFF and data[1] == 0xD8:   # JPEG
+            i, n = 2, len(data)
+            while i + 9 < n:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                m = data[i + 1]
+                if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):  # SOFn
+                    return ((data[i + 7] << 8) | data[i + 8],
+                            (data[i + 5] << 8) | data[i + 6])
+                i += 2 + ((data[i + 2] << 8) | data[i + 3])
+    except Exception:
+        pass
+    return None
 
 
 def _clamp(v, lo, hi):
@@ -418,6 +454,12 @@ class UI:
         self._page_gen = 0        # bumped per page; keys the row cache
         self._browser_link_rows = {}  # visible row -> link index
 
+        # Inline page images (colour TFT only). link_idx -> state dict;
+        # doc_row -> (link_idx, subrow). Populated by _expand_image_blocks().
+        self._page_images = {}
+        self._browser_image_rows = {}
+        self._img_lru = []          # link_idx order, for decoded-buffer eviction
+
         # Chat: dest_hash_bytes -> [(is_mine, text, timestamp, status), ...]
         # status: 0=none, 1=pending, 2=delivered, 3=failed
         self.chat_history = {}
@@ -577,6 +619,7 @@ class UI:
         self.on_browse_back = None    # () -> bool — went back (False: at stack bottom)
         self.on_browse_refresh = None # () -> None
         self.on_browser_exit = None   # () -> None — left the browser (free the link)
+        self.on_fetch_page_image = None   # (link_idx, src) -> None; async fetch
         self.on_net_seed = None       # () -> None — populate nomad_nodes from storage
         self.on_screen_timeout = None # (ms) -> None — persist inactivity timeout
         self.on_wake_mode = None      # (mode) -> None — persist auto-wake policy
@@ -1085,6 +1128,17 @@ class UI:
             y = BODY_Y + (i + 1) * CHAR_H
             ci = i + 2
             if i < len(visible):
+                d = self.browser_scroll + i
+                if d in self._browser_image_rows:
+                    li, subrow = self._browser_image_rows[d]
+                    img = self._page_images.get(li)
+                    st = img["state"] if img else "failed"
+                    ck = "img:%d:%d:%d:%s" % (self._page_gen, li, subrow, st)
+                    if self._cache[ci] == ck:
+                        continue
+                    self._cache[ci] = ck
+                    self._draw_image_row(li, subrow, y)   # defined in Task 8
+                    continue
                 spans = visible[i]
                 for s in spans:
                     if s[4] is not None:
@@ -1130,6 +1184,37 @@ class UI:
         if self._cache[FOOT_SLOT] != foot:
             self._cache[FOOT_SLOT] = foot
             self.tft.text(self.font, self._tb(_pad(foot)), 0, INPUT_Y, fcol, self.BG_DARK)
+
+    def _draw_image_row(self, li, subrow, y):
+        img = self._page_images.get(li)
+        self.tft.fill_rect(0, y, SCREEN_W, CHAR_H, self.BG_DARK)
+        if img is None:
+            return
+        if img["state"] == "idle":
+            img["state"] = "loading"
+            if self.on_fetch_page_image:
+                self.on_fetch_page_image(li, img["src"])
+        n = BODY_ROWS - 1
+        mid = n // 2
+        if img["state"] in ("idle", "loading") and subrow == mid:
+            self._center_text("loading image...", y, self.DIM_CYAN)
+        elif img["state"] == "failed" and subrow == mid:
+            self._center_text("[image failed]", y, self.NEON_MAG)
+        if img["state"] == "ready" and img["buf"] is not None:
+            n = BODY_ROWS - 1
+            block_h = n * CHAR_H
+            voff = (block_h - img["h"]) // 2          # centre vertically
+            row_top = subrow * CHAR_H
+            top = max(row_top, voff)
+            bot = min(row_top + CHAR_H, voff + img["h"])
+            if bot > top:
+                src_y = top - voff
+                strip_h = bot - top
+                xoff = (SCREEN_W - img["w"]) // 2
+                off = src_y * img["w"] * 2
+                strip = memoryview(img["buf"])[off:off + strip_h * img["w"] * 2]
+                self.tft.blit_buffer(strip, xoff, y + (top - row_top),
+                                     img["w"], strip_h)
 
     # --- Chat screen ---
 
@@ -1366,6 +1451,81 @@ class UI:
         self._state_change_ms = time.ticks_ms()
         self.dirty = True
 
+    def view_page_image(self, data):
+        """Full-screen a page image (raw bytes) fetched from a node's /media.
+        Returns to whatever state we came from (the browser)."""
+        self._viewing_image = data
+        self._image_drawn = False
+        self._prev_image_state = self.state
+        self.state = STATE_IMAGE
+        self._state_change_ms = time.ticks_ms()
+        self.dirty = True
+
+    def page_image_loaded(self, li, data):
+        """Called by the browser when a /media fetch for inline image `li`
+        completes. `data` is bytes, or None on failure."""
+        img = self._page_images.get(li)
+        if img is None:
+            return
+        if data is None:
+            img["state"] = "failed"
+        else:
+            img["_raw"] = data
+            self._decode_page_image(li)     # defined in Task 8
+        self.dirty = True
+
+    def _decode_page_image(self, li):
+        """Decode img['_raw'] to an RGB565 buffer scaled to fit the page
+        viewport (width x block height), preserving aspect ratio. Colour TFT
+        only; the decoders are native modules present on that firmware."""
+        img = self._page_images.get(li)
+        if img is None:
+            return
+        data = img.pop("_raw", None)
+        if not data:
+            img["state"] = "failed"
+            return
+        n = BODY_ROWS - 1
+        box_h = n * CHAR_H - 2 * IMG_GAP
+        box_w = SBAR_X - 2                      # leave the scrollbar lane clear
+        try:
+            if len(data) > 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+                import webp_fast_xtensawin as _dec
+            elif len(data) > 2 and data[0] == 0xFF and data[1] == 0xD8:
+                import tjpgd_fast_xtensawin as _dec
+            else:
+                img["state"] = "failed"
+                return
+            # The native decoder stretches to the exact target it's given, so
+            # scale to fit the viewport ourselves — preserving aspect ratio and
+            # never enlarging a small image past its native size.
+            nsz = _img_native_size(data)
+            if nsz:
+                nw, nh = nsz
+                scale = min(box_w / nw, box_h / nh, 1.0)
+                tw, th = max(1, int(nw * scale)), max(1, int(nh * scale))
+            else:
+                tw, th = box_w, box_h
+            w, h, buf = _dec.decode(data, tw, th)
+            img["w"], img["h"], img["buf"], img["state"] = w, h, buf, "ready"
+            self._img_lru_touch(li)
+        except Exception:
+            img["state"] = "failed"
+        finally:
+            gc.collect()
+
+    def _img_lru_touch(self, li):
+        """Keep at most MAX_CACHED_IMAGES decoded buffers; free the rest."""
+        if li in self._img_lru:
+            self._img_lru.remove(li)
+        self._img_lru.append(li)
+        while len(self._img_lru) > MAX_CACHED_IMAGES:
+            old = self._img_lru.pop(0)
+            oimg = self._page_images.get(old)
+            if oimg is not None:
+                oimg["buf"] = None
+                oimg["state"] = "idle"   # re-fetch/re-decode if scrolled back to
+
     def _center_text(self, msg, y, fg):
         self.tft.text(self.font, msg, max(0, (SCREEN_W - len(msg) * CHAR_W) // 2),
                       y, fg, 0x0000)
@@ -1420,14 +1580,16 @@ class UI:
         self._image_drawn = True
 
     def _exit_image_view(self):
-        """Return from image viewer to chat."""
+        """Return from the image viewer to wherever it was entered from."""
         self._viewing_image = None
         self._image_drawn = False
-        self.chat_cursor = -1
-        self.state = STATE_CHAT
+        dest = getattr(self, "_prev_image_state", STATE_CHAT)
+        self.state = dest
+        if dest == STATE_CHAT:
+            self.chat_cursor = -1
+            self._cache = [''] * CACHE_ROWS
         self._prev_state = -1  # force full screen clear in draw()
         self._state_change_ms = time.ticks_ms()
-        self._cache = [''] * CACHE_ROWS
         self.dirty = True
 
     # --- Text wrapping ---
@@ -1798,6 +1960,38 @@ class UI:
 
     # --- Browser page view ---
 
+    def _row_image_link(self, row):
+        """Return the link index if `row` is an image marker (a link whose
+        URL carries the \\x01 sentinel), else None."""
+        for s in row:
+            li = s[4]
+            if (li is not None and li < len(self.browser_links)
+                    and self.browser_links[li][0].startswith("\x01")):
+                return li
+        return None
+
+    def _expand_image_blocks(self):
+        """Replace each single image-marker row with a full page-viewport
+        block of rows, so the image scrolls row-by-row. Colour TFT only."""
+        n = BODY_ROWS - 1
+        out = []
+        self._browser_image_rows = {}
+        self._page_images = {}
+        for row in self.browser_lines:
+            li = self._row_image_link(row)
+            if li is None:
+                out.append(row)
+                continue
+            self._page_images[li] = {
+                "src": self.browser_links[li][0][1:],  # strip \x01 sentinel
+                "state": "idle", "buf": None, "w": 0, "h": 0,
+            }
+            base = len(out)
+            for r in range(n):
+                self._browser_image_rows[base + r] = (li, r)
+                out.append([])   # purely visual; the draw loop blits the strip
+        self.browser_lines = out
+
     def show_page(self, title, path, lines, links, can_back=False, keep_pos=False):
         """Display a rendered micron page (called by nomad_browser). keep_pos
         preserves the scroll/cursor across a reload of the same page."""
@@ -1806,10 +2000,15 @@ class UI:
         self.browser_lines = lines
         self.browser_links = links
         self._browser_can_back = can_back
+        if not self._mono:
+            self._expand_image_blocks()   # reassigns self.browser_lines
+        else:
+            self._browser_image_rows = {}
+            self._page_images = {}
         if keep_pos:
             # clamp the preserved scroll to the (possibly changed) content
             _rows = BODY_ROWS - 1
-            self.browser_scroll = max(0, min(self.browser_scroll, max(0, len(lines) - _rows)))
+            self.browser_scroll = max(0, min(self.browser_scroll, max(0, len(self.browser_lines) - _rows)))
         else:
             self.browser_scroll = 0
             self.browser_cursor = -1

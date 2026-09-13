@@ -4,3 +4,5 @@ tools/natmod/*/build/
 tools/natmod/*/.mpy_ld_cache/
 tools/firmware_build/
 tools/firmware_build.log
+/docs/
+/.superpowers/
