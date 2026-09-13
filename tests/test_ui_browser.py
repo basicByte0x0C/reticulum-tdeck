@@ -427,6 +427,26 @@ def test_page_image_click_calls_follow_with_sentinel():
     assert got == ["\x01:/media/logo.webp"]
 
 
+def test_image_block_expands_on_colour_tft():
+    g, _ = _mkui()  # colour TFT (no mono)
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    assert len(g.browser_lines) == ui.BODY_ROWS - 1     # full-viewport block
+    assert g._browser_image_rows.get(0) == (0, 0)
+    assert 0 in g._page_images
+    assert g._page_images[0]["src"] == ":/media/logo.webp"
+    assert g._page_images[0]["state"] == "idle"
+
+
+def test_image_block_not_expanded_on_mono():
+    g, _ = _mkui(mono=True)
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    assert len(g.browser_lines) == 1        # placeholder link row kept as-is
+    assert g._browser_image_rows == {}
+    assert g._page_images == {}
+
+
 def test_view_page_image_enters_viewer():
     g, _ = _mkui()
     g.state = ui.STATE_BROWSER

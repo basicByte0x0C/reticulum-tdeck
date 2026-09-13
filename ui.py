@@ -418,6 +418,12 @@ class UI:
         self._page_gen = 0        # bumped per page; keys the row cache
         self._browser_link_rows = {}  # visible row -> link index
 
+        # Inline page images (colour TFT only). link_idx -> state dict;
+        # doc_row -> (link_idx, subrow). Populated by _expand_image_blocks().
+        self._page_images = {}
+        self._browser_image_rows = {}
+        self._img_lru = []          # link_idx order, for decoded-buffer eviction
+
         # Chat: dest_hash_bytes -> [(is_mine, text, timestamp, status), ...]
         # status: 0=none, 1=pending, 2=delivered, 3=failed
         self.chat_history = {}
@@ -1810,6 +1816,38 @@ class UI:
 
     # --- Browser page view ---
 
+    def _row_image_link(self, row):
+        """Return the link index if `row` is an image marker (a link whose
+        URL carries the \\x01 sentinel), else None."""
+        for s in row:
+            li = s[4]
+            if (li is not None and li < len(self.browser_links)
+                    and self.browser_links[li][0].startswith("\x01")):
+                return li
+        return None
+
+    def _expand_image_blocks(self):
+        """Replace each single image-marker row with a full page-viewport
+        block of rows, so the image scrolls row-by-row. Colour TFT only."""
+        n = BODY_ROWS - 1
+        out = []
+        self._browser_image_rows = {}
+        self._page_images = {}
+        for row in self.browser_lines:
+            li = self._row_image_link(row)
+            if li is None:
+                out.append(row)
+                continue
+            self._page_images[li] = {
+                "src": self.browser_links[li][0][1:],  # strip \x01 sentinel
+                "state": "idle", "buf": None, "w": 0, "h": 0,
+            }
+            base = len(out)
+            for r in range(n):
+                self._browser_image_rows[base + r] = (li, r)
+                out.append([])   # purely visual; the draw loop blits the strip
+        self.browser_lines = out
+
     def show_page(self, title, path, lines, links, can_back=False, keep_pos=False):
         """Display a rendered micron page (called by nomad_browser). keep_pos
         preserves the scroll/cursor across a reload of the same page."""
@@ -1818,10 +1856,15 @@ class UI:
         self.browser_lines = lines
         self.browser_links = links
         self._browser_can_back = can_back
+        if not self._mono:
+            self._expand_image_blocks()   # reassigns self.browser_lines
+        else:
+            self._browser_image_rows = {}
+            self._page_images = {}
         if keep_pos:
             # clamp the preserved scroll to the (possibly changed) content
             _rows = BODY_ROWS - 1
-            self.browser_scroll = max(0, min(self.browser_scroll, max(0, len(lines) - _rows)))
+            self.browser_scroll = max(0, min(self.browser_scroll, max(0, len(self.browser_lines) - _rows)))
         else:
             self.browser_scroll = 0
             self.browser_cursor = -1
