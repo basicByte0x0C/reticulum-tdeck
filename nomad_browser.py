@@ -17,7 +17,11 @@ MAX_NODES = 16
 PATH_WAIT = 30        # seconds to wait for a path after request_path()
 FETCH_CAP = 600       # outer safety cap; link layer handles real timeouts
 INDEX_PAGE = "/page/index.mu"
-IMG_FETCH_CAP = 120           # seconds; outer safety cap for a /media fetch
+IMG_FETCH_CAP = 630           # seconds; outer safety net only. Kept just above
+                              # urns' RTT-scaled resource ceiling (TIMEOUT_MAX
+                              # 600 s) so the resource layer concludes first and
+                              # reports the real reason ("transfer failed")
+                              # instead of a bare "image timeout".
 MAX_IMAGE_BYTES = 512 * 1024  # reject anything larger before it hits the decoder
 
 _gui = None
