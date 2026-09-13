@@ -583,6 +583,7 @@ class UI:
         self.on_browse_back = None    # () -> bool — went back (False: at stack bottom)
         self.on_browse_refresh = None # () -> None
         self.on_browser_exit = None   # () -> None — left the browser (free the link)
+        self.on_fetch_page_image = None   # (link_idx, src) -> None; async fetch
         self.on_net_seed = None       # () -> None — populate nomad_nodes from storage
         self.on_screen_timeout = None # (ms) -> None — persist inactivity timeout
         self.on_wake_mode = None      # (mode) -> None — persist auto-wake policy
@@ -1091,6 +1092,17 @@ class UI:
             y = BODY_Y + (i + 1) * CHAR_H
             ci = i + 2
             if i < len(visible):
+                d = self.browser_scroll + i
+                if d in self._browser_image_rows:
+                    li, subrow = self._browser_image_rows[d]
+                    img = self._page_images.get(li)
+                    st = img["state"] if img else "failed"
+                    ck = "img:%d:%d:%s" % (li, subrow, st)
+                    if self._cache[ci] == ck:
+                        continue
+                    self._cache[ci] = ck
+                    self._draw_image_row(li, subrow, y)   # defined in Task 8
+                    continue
                 spans = visible[i]
                 for s in spans:
                     if s[4] is not None:
@@ -1136,6 +1148,22 @@ class UI:
         if self._cache[FOOT_SLOT] != foot:
             self._cache[FOOT_SLOT] = foot
             self.tft.text(self.font, self._tb(_pad(foot)), 0, INPUT_Y, fcol, self.BG_DARK)
+
+    def _draw_image_row(self, li, subrow, y):
+        img = self._page_images.get(li)
+        self.tft.fill_rect(0, y, SCREEN_W, CHAR_H, self.BG_DARK)
+        if img is None:
+            return
+        if img["state"] == "idle":
+            img["state"] = "loading"
+            if self.on_fetch_page_image:
+                self.on_fetch_page_image(li, img["src"])
+        n = BODY_ROWS - 1
+        mid = n // 2
+        if img["state"] in ("idle", "loading") and subrow == mid:
+            self._center_text("loading image...", y, self.DIM_CYAN)
+        elif img["state"] == "failed" and subrow == mid:
+            self._center_text("[image failed]", y, self.NEON_MAG)
 
     # --- Chat screen ---
 
@@ -1380,6 +1408,19 @@ class UI:
         self._prev_image_state = self.state
         self.state = STATE_IMAGE
         self._state_change_ms = time.ticks_ms()
+        self.dirty = True
+
+    def page_image_loaded(self, li, data):
+        """Called by the browser when a /media fetch for inline image `li`
+        completes. `data` is bytes, or None on failure."""
+        img = self._page_images.get(li)
+        if img is None:
+            return
+        if data is None:
+            img["state"] = "failed"
+        else:
+            img["_raw"] = data
+            self._decode_page_image(li)     # defined in Task 8
         self.dirty = True
 
     def _center_text(self, msg, y, fg):

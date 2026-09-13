@@ -447,6 +447,27 @@ def test_image_block_not_expanded_on_mono():
     assert g._page_images == {}
 
 
+def test_visible_image_triggers_fetch_once():
+    g, _ = _mkui()
+    fetched = []
+    g.on_fetch_page_image = lambda li, src: fetched.append((li, src))
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    g.draw()
+    g.draw()  # a second draw must NOT re-fetch (state left the idle bucket)
+    assert fetched == [(0, ":/media/logo.webp")]
+    assert g._page_images[0]["state"] == "loading"
+
+
+def test_failed_image_marks_state():
+    g, _ = _mkui()
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    g.page_image_loaded(0, None)
+    assert g._page_images[0]["state"] == "failed"
+    g.draw()  # must draw the failure placeholder without raising
+
+
 def test_view_page_image_enters_viewer():
     g, _ = _mkui()
     g.state = ui.STATE_BROWSER
