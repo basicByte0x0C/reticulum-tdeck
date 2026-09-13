@@ -509,6 +509,30 @@ def test_image_rows_redraw_fully_after_navigation():
         assert sorted(drawn) == list(range(n)), (src, sorted(drawn))
 
 
+def test_ready_image_blits_strip():
+    g, tft = _mkui()
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    # simulate a decoded 120x80 image centred in the block
+    img = g._page_images[0]
+    img["state"] = "ready"; img["w"] = 120; img["h"] = 80
+    img["buf"] = bytes(120 * 80 * 2)
+    g.draw()
+    blits = [c for c in tft.calls if c[0] == "blit"]
+    assert blits, "expected at least one strip blit"
+    for _, x, y, w, h in blits:
+        assert w == 120 and 1 <= h <= ui.CHAR_H
+        assert x == (320 - 120) // 2
+
+
+def test_ready_image_does_not_blit_on_mono():
+    g, tft = _mkui(mono=True)   # e-ink keeps a placeholder, never a raster block
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/p", lines, links)
+    g.draw()
+    assert not any(c[0] == "blit" for c in tft.calls)
+
+
 def test_view_page_image_enters_viewer():
     g, _ = _mkui()
     g.state = ui.STATE_BROWSER

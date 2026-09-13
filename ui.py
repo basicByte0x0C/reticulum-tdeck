@@ -107,6 +107,8 @@ INPUT_SLOT = BODY_ROWS + 2
 SBAR_X = SCREEN_W - 3   # 317
 SBAR_W = 2
 
+IMG_GAP = 2   # px of breathing room top/bottom inside an inline image block
+
 # Voice recording
 REC_MAX_SECS = 15  # matches tdeck_node _rec_buf sizing
 
@@ -1164,6 +1166,21 @@ class UI:
             self._center_text("loading image...", y, self.DIM_CYAN)
         elif img["state"] == "failed" and subrow == mid:
             self._center_text("[image failed]", y, self.NEON_MAG)
+        if img["state"] == "ready" and img["buf"] is not None:
+            n = BODY_ROWS - 1
+            block_h = n * CHAR_H
+            voff = (block_h - img["h"]) // 2          # centre vertically
+            row_top = subrow * CHAR_H
+            top = max(row_top, voff)
+            bot = min(row_top + CHAR_H, voff + img["h"])
+            if bot > top:
+                src_y = top - voff
+                strip_h = bot - top
+                xoff = (SCREEN_W - img["w"]) // 2
+                off = src_y * img["w"] * 2
+                strip = memoryview(img["buf"])[off:off + strip_h * img["w"] * 2]
+                self.tft.blit_buffer(strip, xoff, y + (top - row_top),
+                                     img["w"], strip_h)
 
     # --- Chat screen ---
 
@@ -1422,6 +1439,48 @@ class UI:
             img["_raw"] = data
             self._decode_page_image(li)     # defined in Task 8
         self.dirty = True
+
+    def _decode_page_image(self, li):
+        """Decode img['_raw'] to an RGB565 buffer scaled to fit the page
+        viewport (width x block height), preserving aspect ratio. Colour TFT
+        only; the decoders are native modules present on that firmware."""
+        img = self._page_images.get(li)
+        if img is None:
+            return
+        data = img.pop("_raw", None)
+        if not data:
+            img["state"] = "failed"
+            return
+        n = BODY_ROWS - 1
+        box_h = n * CHAR_H - 2 * IMG_GAP
+        box_w = SBAR_X - 2                      # leave the scrollbar lane clear
+        try:
+            if len(data) > 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+                import webp_fast_xtensawin as _dec
+            elif len(data) > 2 and data[0] == 0xFF and data[1] == 0xD8:
+                import tjpgd_fast_xtensawin as _dec
+            else:
+                img["state"] = "failed"
+                return
+            w, h, buf = _dec.decode(data, box_w, box_h)
+            img["w"], img["h"], img["buf"], img["state"] = w, h, buf, "ready"
+            self._img_lru_touch(li)
+        except Exception:
+            img["state"] = "failed"
+        finally:
+            gc.collect()
+
+    def _img_lru_touch(self, li):
+        """Keep at most MAX_CACHED_IMAGES decoded buffers; free the rest."""
+        if li in self._img_lru:
+            self._img_lru.remove(li)
+        self._img_lru.append(li)
+        while len(self._img_lru) > MAX_CACHED_IMAGES:
+            old = self._img_lru.pop(0)
+            oimg = self._page_images.get(old)
+            if oimg is not None:
+                oimg["buf"] = None
+                oimg["state"] = "idle"   # re-fetch/re-decode if scrolled back to
 
     def _center_text(self, msg, y, fg):
         self.tft.text(self.font, msg, max(0, (SCREEN_W - len(msg) * CHAR_W) // 2),
