@@ -375,7 +375,9 @@ async def _fetch_image(src):
             return None
         _status("loading image...")
         _result = None
-        rid = _link.request("/media", data={"path": media_path},
+        # Reference NomadNet's serve_media requires a "key" field to be present
+        # (its own browser sends key=None); without it the node returns nothing.
+        rid = _link.request("/media", data={"path": media_path, "key": None},
                             response_callback=_on_response,
                             failed_callback=_on_req_failed,
                             progress_callback=_on_progress,
