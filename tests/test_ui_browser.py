@@ -62,9 +62,15 @@ class FakeTFT:
     def fill(self, c):
         self.calls.append(("fill", c))
 
+    def blit_buffer(self, buf, x, y, w, h):
+        assert 0 <= x <= 320 and 0 <= y <= 240, (x, y)
+        self.calls.append(("blit", x, y, w, h))
 
-def _mkui():
+
+def _mkui(mono=False):
     tft = FakeTFT()
+    if mono:
+        tft.mono = True
     g = ui.UI(tft, object(), lambda: b"\x00", node_name="test")
     g._screen_on = True
     return g, tft
@@ -407,6 +413,45 @@ def test_browser_prev_next_and_paging():
     assert g.browser_scroll == max(0, len(lines2) - (ui.BODY_ROWS - 1))
     g._browser_goto(True)
     assert g.browser_scroll == 0
+
+
+def test_page_image_click_calls_follow_with_sentinel():
+    g, _ = _mkui(mono=True)              # placeholder path (Pro): marker stays a link
+    got = []
+    g.on_browse_follow = lambda url: got.append(url)
+    lines, links = micron.render("`(logo`:/media/logo.webp)", 40)
+    g.show_page("n", "/page/index.mu", lines, links)
+    g.draw()                             # populates _browser_link_rows (see test_cursor_and_link_follow)
+    g.browser_cursor = 0                 # cursor on the image marker row
+    g._browser_follow_cursor()
+    assert got == ["\x01:/media/logo.webp"]
+
+
+def test_view_page_image_enters_viewer():
+    g, _ = _mkui()
+    g.state = ui.STATE_BROWSER
+    g.view_page_image(b"\xff\xd8fake")
+    assert g.state == ui.STATE_IMAGE
+    assert g._viewing_image == b"\xff\xd8fake"
+    assert g._prev_image_state == ui.STATE_BROWSER
+
+
+def test_exit_page_image_returns_to_browser():
+    g, _ = _mkui()
+    g.state = ui.STATE_BROWSER
+    g.view_page_image(b"x")
+    g._exit_image_view()
+    assert g.state == ui.STATE_BROWSER
+
+
+def test_exit_chat_image_still_returns_to_chat():
+    g, _ = _mkui()
+    g.state = ui.STATE_CHAT
+    g._prev_image_state = ui.STATE_CHAT
+    g._viewing_image = b"x"
+    g.state = ui.STATE_IMAGE
+    g._exit_image_view()
+    assert g.state == ui.STATE_CHAT
 
 
 def test_wifi_result_flow():

@@ -1366,6 +1366,16 @@ class UI:
         self._state_change_ms = time.ticks_ms()
         self.dirty = True
 
+    def view_page_image(self, data):
+        """Full-screen a page image (raw bytes) fetched from a node's /media.
+        Returns to whatever state we came from (the browser)."""
+        self._viewing_image = data
+        self._image_drawn = False
+        self._prev_image_state = self.state
+        self.state = STATE_IMAGE
+        self._state_change_ms = time.ticks_ms()
+        self.dirty = True
+
     def _center_text(self, msg, y, fg):
         self.tft.text(self.font, msg, max(0, (SCREEN_W - len(msg) * CHAR_W) // 2),
                       y, fg, 0x0000)
@@ -1420,14 +1430,16 @@ class UI:
         self._image_drawn = True
 
     def _exit_image_view(self):
-        """Return from image viewer to chat."""
+        """Return from the image viewer to wherever it was entered from."""
         self._viewing_image = None
         self._image_drawn = False
-        self.chat_cursor = -1
-        self.state = STATE_CHAT
+        dest = getattr(self, "_prev_image_state", STATE_CHAT)
+        self.state = dest
+        if dest == STATE_CHAT:
+            self.chat_cursor = -1
+            self._cache = [''] * CACHE_ROWS
         self._prev_state = -1  # force full screen clear in draw()
         self._state_change_ms = time.ticks_ms()
-        self._cache = [''] * CACHE_ROWS
         self.dirty = True
 
     # --- Text wrapping ---
