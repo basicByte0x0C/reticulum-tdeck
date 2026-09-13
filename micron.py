@@ -81,6 +81,24 @@ def _clean(s):
         or 0x2500 <= ord(c) <= 0x25A0 or ord(c) in (0xB0, 0xB7, 0x2219, 0x221A))
 
 
+def _parse_image_tag(s):
+    """Parse a block-level micron image tag: `(alt`params`:src).
+
+    `s` is the stripped line and starts with "`(". Fields are backtick-
+    separated; the last is the source URL, the first is the alt text, any
+    middle fields (e.g. a=c sizing) are display hints we ignore. Returns
+    (src, alt) or None when there is no closing ) or no source."""
+    end = s.find(")", 2)
+    if end < 0:
+        return None
+    parts = s[2:end].split("`")
+    src = _clean(parts[-1]).strip()
+    alt = _clean(parts[0]).strip() if len(parts) > 1 else ""
+    if not src:
+        return None
+    return src, alt
+
+
 class _State:
     def __init__(self):
         self.fg = FG_DEFAULT
@@ -316,6 +334,17 @@ def render(text, width=40):
             fill = _clean(fill) or "-"
             lines.append([(0, fill * width, FG_DIM, BG_DEFAULT, None)])
             continue
+
+        stripped = line.lstrip()
+        if stripped.startswith("`("):
+            img = _parse_image_tag(stripped)
+            if img is not None:
+                src, alt = img
+                links.append(("\x01" + src, alt))
+                label = _clean("[img] " + (alt or "image"))[:width]
+                lines.append([(0, label, FG_LINK, BG_DEFAULT, len(links) - 1)])
+                continue
+            # no valid tag — fall through to normal inline handling
 
         if line == "":
             lines.append([])

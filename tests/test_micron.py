@@ -157,6 +157,44 @@ def test_unterminated_link_survives():
     assert _text(lines)[-1] == "next line"
 
 
+def test_image_tag_three_fields():
+    # `(alt`params`:src)  — the shape the upstream example page emits
+    lines, links = render("`(MicroPython logo`a=c`:/media/logo.webp)", width=40)
+    assert links == [("\x01:/media/logo.webp", "MicroPython logo")]
+    row = lines[0]
+    assert len(row) == 1
+    col, text, fg, bg, link = row[0]
+    assert link == 0
+    assert fg == micron.FG_LINK
+    assert "MicroPython logo" in text
+    assert col + len(text) <= 40
+
+
+def test_image_tag_two_fields_and_no_alt():
+    _, links = render("`(cat`:/media/cat.webp)", width=40)
+    assert links == [("\x01:/media/cat.webp", "cat")]
+    _, links2 = render("`(:/media/x.webp)", width=40)
+    assert links2 == [("\x01:/media/x.webp", "")]
+    lines2, _ = render("`(:/media/x.webp)", width=40)
+    assert lines2[0][0][4] == 0  # still a selectable link row
+
+
+def test_image_tag_unterminated_falls_through():
+    lines, links = render("`(broken no close\nnext line", width=40)
+    assert links == []                      # not registered as an image
+    assert _text(lines)[-1] == "next line"  # page keeps rendering
+
+
+def test_image_tag_no_src_ignored():
+    _, links = render("`()", width=40)
+    assert links == []
+
+
+def test_image_tag_indented():
+    _, links = render("   `(logo`:/media/logo.webp)", width=40)
+    assert links == [("\x01:/media/logo.webp", "logo")]
+
+
 def test_input_field_placeholder():
     lines, _ = render("Name: `<user`> done", width=40)
     flat = _text(lines)[0]
