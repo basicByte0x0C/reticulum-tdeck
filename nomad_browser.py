@@ -391,3 +391,16 @@ async def _fetch_image(src):
     finally:
         _fetching = False
         _gui.transfer_progress = None
+
+
+def fetch_page_image(li, src):
+    """UI callback: fetch an inline page image and hand it back by index."""
+    import uasyncio as asyncio
+    asyncio.create_task(_auto_fetch_task(li, src))
+
+
+async def _auto_fetch_task(li, src):
+    data = await _fetch_image(src)
+    _gui.page_image_loaded(li, data)
+    _gui.dirty = True
+    gc.collect()

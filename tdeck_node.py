@@ -1237,6 +1237,7 @@ gui.on_browse_follow = nomad_browser.follow
 gui.on_browse_back = nomad_browser.back
 gui.on_browse_refresh = nomad_browser.refresh
 gui.on_browser_exit = nomad_browser.browser_exit
+gui.on_fetch_page_image = nomad_browser.fetch_page_image
 
 # --- rnsh shell client (SSH tab) ---
 import rnsh_client
