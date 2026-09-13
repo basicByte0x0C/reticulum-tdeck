@@ -1097,7 +1097,7 @@ class UI:
                     li, subrow = self._browser_image_rows[d]
                     img = self._page_images.get(li)
                     st = img["state"] if img else "failed"
-                    ck = "img:%d:%d:%s" % (li, subrow, st)
+                    ck = "img:%d:%d:%d:%s" % (self._page_gen, li, subrow, st)
                     if self._cache[ci] == ck:
                         continue
                     self._cache[ci] = ck

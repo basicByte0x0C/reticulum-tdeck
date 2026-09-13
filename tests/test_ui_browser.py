@@ -468,6 +468,47 @@ def test_failed_image_marks_state():
     g.draw()  # must draw the failure placeholder without raising
 
 
+def test_image_fetch_fires_across_page_navigation():
+    # Regression: the image-row cache key must include _page_gen, or a second
+    # image page whose image lands at the same (li=0, subrow=0) collides with
+    # the first page's stale "idle" cache entry and never fetches.
+    g, _ = _mkui()  # colour TFT
+    fetched = []
+    g.on_fetch_page_image = lambda li, src: fetched.append(src)
+    for src in (":/media/a.webp", ":/media/b.webp"):
+        lines, links = micron.render("`(x`%s)" % src, 40)
+        g.show_page("n", "/p", lines, links)
+        g.draw()
+    assert fetched == [":/media/a.webp", ":/media/b.webp"], fetched
+
+
+def test_image_rows_redraw_fully_after_navigation():
+    # Tighter than the fetch-count check above. The image block shares one
+    # state dict across all its subrows, and that dict's mutation ordering
+    # can mask the missing-_page_gen bug: a later subrow's stale key happens
+    # to mismatch and still fires the fetch, even though row 0 itself (and
+    # most other rows) silently keep the PREVIOUS page's stale pixels and
+    # are never handed to _draw_image_row at all. Assert every subrow of
+    # the new page's image block is actually redrawn -- not just that some
+    # row, somewhere, eventually re-fetches.
+    g, _ = _mkui()  # colour TFT
+    drawn = []
+    orig = g._draw_image_row
+
+    def traced(li, subrow, y):
+        drawn.append(subrow)
+        return orig(li, subrow, y)
+
+    g._draw_image_row = traced
+    n = ui.BODY_ROWS - 1
+    for src in (":/media/a.webp", ":/media/b.webp"):
+        lines, links = micron.render("`(x`%s)" % src, 40)
+        g.show_page("n", "/p", lines, links)
+        drawn.clear()
+        g.draw()
+        assert sorted(drawn) == list(range(n)), (src, sorted(drawn))
+
+
 def test_view_page_image_enters_viewer():
     g, _ = _mkui()
     g.state = ui.STATE_BROWSER
