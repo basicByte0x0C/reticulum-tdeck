@@ -17,6 +17,9 @@ MAX_NODES = 16
 PATH_WAIT = 30        # seconds to wait for a path after request_path()
 FETCH_CAP = 600       # outer safety cap; link layer handles real timeouts
 INDEX_PAGE = "/page/index.mu"
+IMG_FETCH_CAP = 120           # seconds; outer safety cap for a /media fetch
+MAX_IMAGE_BYTES = 512 * 1024  # reject anything larger before it hits the decoder
+_img_fetching = False         # serialises image fetches (one link, one at a time)
 
 _gui = None
 _link = None          # OutgoingLink to the node being browsed
@@ -149,6 +152,10 @@ def browse(dest_hash, path=INDEX_PAGE):
 def follow(url):
     """GUI: follow a micron link from the current page."""
     if not _history:
+        return
+    if url.startswith("\x01"):        # inline image marker -> fetch /media
+        import uasyncio as asyncio
+        asyncio.create_task(_fetch_image_task(url[1:]))
         return
     cur_dest = _history[-1][0]
     dest = cur_dest
@@ -329,3 +336,59 @@ async def _fetch(dest_hash, path, push, keep_pos=False):
     _gui.browser_status = None
     _gui.show_page(title, path, lines, links, can_back=len(_history) > 1,
                    keep_pos=keep_pos)
+
+
+async def _fetch_image_task(src):
+    """Click path: fetch a page image and open the full-screen viewer."""
+    data = await _fetch_image(src)
+    if data is not None:
+        _gui.view_page_image(data)
+    _gui.dirty = True
+    gc.collect()
+
+
+async def _fetch_image(src):
+    """Fetch one inline image from the current node's /media endpoint.
+    Same-node relative src (':/media/<file>') only. Returns bytes or None."""
+    global _img_fetching, _result
+    import uasyncio as asyncio
+    from urns.link import OutgoingLink
+
+    if not src.startswith(":"):
+        _status("image: cross-node not supported")
+        return None
+    media_path = src[1:]                       # ':/media/x.webp' -> '/media/x.webp'
+    if _link is None or _link.status != OutgoingLink.ACTIVE:
+        _status("image: no link")
+        return None
+
+    while _img_fetching:                        # queue behind any in-flight image
+        await asyncio.sleep_ms(100)
+    _img_fetching = True
+    try:
+        _status("loading image...")
+        _result = None
+        rid = _link.request("/media", data={"path": media_path},
+                            response_callback=_on_response,
+                            failed_callback=_on_req_failed,
+                            progress_callback=_on_progress,
+                            max_response_size=MAX_IMAGE_BYTES)
+        if rid is None:
+            _status("image request failed")
+            return None
+        t0 = time.time()
+        while _result is None and time.time() - t0 < IMG_FETCH_CAP:
+            await asyncio.sleep_ms(200)
+        if _result is None or _result[0] != "ok":
+            _status(_result[1] if _result else "image timeout")
+            return None
+        data = _result[1]
+        _result = None
+        if not isinstance(data, (bytes, bytearray)):
+            _status("bad image data")
+            return None
+        _gui.browser_status = None
+        return bytes(data)
+    finally:
+        _img_fetching = False
+        _gui.transfer_progress = None
