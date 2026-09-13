@@ -19,7 +19,6 @@ FETCH_CAP = 600       # outer safety cap; link layer handles real timeouts
 INDEX_PAGE = "/page/index.mu"
 IMG_FETCH_CAP = 120           # seconds; outer safety cap for a /media fetch
 MAX_IMAGE_BYTES = 512 * 1024  # reject anything larger before it hits the decoder
-_img_fetching = False         # serialises image fetches (one link, one at a time)
 
 _gui = None
 _link = None          # OutgoingLink to the node being browsed
@@ -350,7 +349,7 @@ async def _fetch_image_task(src):
 async def _fetch_image(src):
     """Fetch one inline image from the current node's /media endpoint.
     Same-node relative src (':/media/<file>') only. Returns bytes or None."""
-    global _img_fetching, _result
+    global _fetching, _result
     import uasyncio as asyncio
     from urns.link import OutgoingLink
 
@@ -362,9 +361,9 @@ async def _fetch_image(src):
         _status("image: no link")
         return None
 
-    while _img_fetching:                        # queue behind any in-flight image
-        await asyncio.sleep_ms(100)
-    _img_fetching = True
+    while _fetching:                            # queue behind any in-flight fetch
+        await asyncio.sleep_ms(100)              # (page or image - one _result channel)
+    _fetching = True
     try:
         _status("loading image...")
         _result = None
@@ -390,5 +389,5 @@ async def _fetch_image(src):
         _gui.browser_status = None
         return bytes(data)
     finally:
-        _img_fetching = False
+        _fetching = False
         _gui.transfer_progress = None
