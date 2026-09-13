@@ -91,14 +91,18 @@ else
 fi
 
 # Build mpy-cross. Each -Wno-error is compiler-specific and unknown ones are
-# hard errors, so probe before use: gnu-folding-constant is Apple-Clang-only
-# (VLA warning), unterminated-string-initialization arrived in GCC 15 and
-# fires -Werror on MicroPython v1.24 sources.
+# hard errors under -Werror, so probe before use -- and the probe must carry
+# -Werror itself, exactly as the real mpy-cross build does. Without it, clang
+# treats an unknown -Wno-error=... as a soft warning and still exits 0, so the
+# probe would "pass" and add a flag that then aborts the real -Werror build.
+# gnu-folding-constant is Apple-Clang-only (VLA warning);
+# unterminated-string-initialization arrived in GCC 15 and fires -Werror on
+# MicroPython v1.24 sources.
 echo "=== Building mpy-cross ==="
 MPYCROSS_CFLAGS=""
 for _flag in gnu-folding-constant unterminated-string-initialization; do
     if echo 'int main(void){return 0;}' | \
-       cc -fsyntax-only "-Wno-error=$_flag" -x c - 2>/dev/null; then
+       cc -fsyntax-only -Werror "-Wno-error=$_flag" -x c - 2>/dev/null; then
         MPYCROSS_CFLAGS="$MPYCROSS_CFLAGS -Wno-error=$_flag"
     fi
 done
