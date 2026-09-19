@@ -3540,6 +3540,17 @@ class UI:
                 self._shell_menu_move(-1)
             else:
                 self._shell_scroll(1)     # scroll terminal toward older output
+        elif self.state == STATE_RRC_CHAT:
+            # Panel-open is handled earlier in handle_trackball and never
+            # reaches here. One tick = one wrapped line toward older
+            # scrollback, clamped so the window can't run past the top
+            # (same flatten _visible_lines uses, so the clamp matches what
+            # actually gets drawn).
+            import rrc_ui
+            rows = BODY_ROWS - 1
+            max_scroll = max(0, len(rrc_ui._flatten(self)) - rows)
+            if self._rrc_scroll_chat < max_scroll:
+                self._rrc_scroll_chat += 1
         else:
             # Move cursor up; scroll viewport when cursor reaches top
             _chat_rows = BODY_ROWS - 1
@@ -3595,6 +3606,12 @@ class UI:
                 self._shell_menu_move(1)
             else:
                 self._shell_scroll(-1)    # scroll terminal toward newer output
+        elif self.state == STATE_RRC_CHAT:
+            # One tick = one wrapped line toward the newest message; 0 is
+            # the floor -- rrc_line() already snaps here on arrival, so
+            # this only ever needs to climb back down to it.
+            if self._rrc_scroll_chat > 0:
+                self._rrc_scroll_chat -= 1
         else:
             # Move cursor down; scroll viewport when cursor reaches bottom
             _chat_rows = BODY_ROWS - 1

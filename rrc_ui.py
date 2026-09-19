@@ -68,8 +68,10 @@ def _wrap(text, width):
     return out
 
 
-def _visible_lines(ui, rows):
-    """Flatten scrollback into wrapped display lines, newest last."""
+def _flatten(ui):
+    """Wrap every scrollback line to COLS, newest last. Shared by
+    _visible_lines (which windows it) and the trackball scroll clamp
+    (which only needs the total count)."""
     flat = []
     for kind, nick, text in ui._rrc_lines:
         body = text
@@ -79,6 +81,12 @@ def _visible_lines(ui, rows):
             body = "* " + nick + " " + text
         for piece in _wrap(_ascii(body), COLS):
             flat.append((kind, piece))
+    return flat
+
+
+def _visible_lines(ui, rows):
+    """Flatten scrollback into wrapped display lines, newest last."""
+    flat = _flatten(ui)
     start = max(0, len(flat) - rows - ui._rrc_scroll_chat)
     return flat[start:start + rows]
 

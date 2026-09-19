@@ -1248,6 +1248,22 @@ gui.on_shell_disconnect = rnsh_client.disconnect
 gui.on_shell_resize = rnsh_client.resize
 gui.my_identity_hash = rns.identity.hexhash   # for a listener's allowed-identities list
 
+# --- RRC client (RRC tab) ---
+import rrc_client
+rrc_client.init(gui, rns.identity)
+gui.on_rrc_connect = rrc_client.connect
+gui.on_rrc_join = rrc_client.join
+gui.on_rrc_say = rrc_client.say
+gui.on_rrc_part = rrc_client.part
+gui.on_rrc_disconnect = rrc_client.disconnect
+gui.on_rrc_mention = rrc_client.mention_for
+# on_rrc_seed is deliberately left unassigned: hub discovery is
+# announce-driven from rrc_client.init() (a Transport announce handler
+# registered once at boot), so there is nothing to seed on tab switch --
+# same reasoning applies to on_net_seed/on_shell_seed, neither of which is
+# wired anywhere in this file either. ui.py guards the call site, so
+# leaving it unassigned is inert, not a bug.
+
 _MAX_REC_SECS = 15  # max recording duration
 _REC_CHUNK = 640    # samples per mic read (80ms) — larger chunks reduce GIL contention
 _rec_buf = bytearray(_MAX_REC_SECS * 8000 * 2)  # permanent recording buffer — avoids fragmentation

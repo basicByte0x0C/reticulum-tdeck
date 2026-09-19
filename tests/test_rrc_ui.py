@@ -577,6 +577,150 @@ def test_trackball_click_inside_the_panel_inserts_mention_via_handle_trackball()
     print("ok test_trackball_click_inside_the_panel_inserts_mention_via_handle_trackball")
 
 
+def test_trackball_up_scrolls_room_history_back():
+    # Full entry point (handle_trackball), not _scroll_up() or
+    # rrc_ui._visible_lines() directly -- the wiring gap (Task 10's Gap 2)
+    # was that nothing drove _rrc_scroll_chat at all with the panel closed,
+    # and calling the helpers directly would not have caught that.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(20):
+        g.rrc_line("msg", "sam", "line %02d" % i)
+    import rrc_ui
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "line 19" in painted, painted   # rrc_line() snaps to the bottom
+    assert "line 08" not in painted, painted
+
+    g._irq_up = 1
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 1, g._rrc_scroll_chat
+
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "line 19" not in painted, painted   # scrolled one line into the past
+    assert "line 08" in painted, painted
+    print("ok test_trackball_up_scrolls_room_history_back")
+
+
+def test_trackball_up_clamps_at_the_top_of_scrollback():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(20):
+        g.rrc_line("msg", "sam", "line %02d" % i)
+    import rrc_ui
+    rows = U.BODY_ROWS - 1
+    max_scroll = len(rrc_ui._flatten(g)) - rows
+    g._irq_up = 50          # spin far past the available scrollback in one drain
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == max_scroll, (g._rrc_scroll_chat, max_scroll)
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "line 00" in painted, painted   # the oldest line is now on screen
+    print("ok test_trackball_up_clamps_at_the_top_of_scrollback")
+
+
+def test_trackball_down_does_not_go_negative():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(5):
+        g.rrc_line("msg", "sam", "line %d" % i)
+    assert g._rrc_scroll_chat == 0
+    g._irq_down = 10        # already at the bottom -- must not underflow
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 0, g._rrc_scroll_chat
+    print("ok test_trackball_down_does_not_go_negative")
+
+
+def test_trackball_up_is_a_noop_when_everything_already_fits():
+    # Fewer lines than the view holds: _visible_lines' own max(0, ...)
+    # clamp already covers this, but the trackball's own clamp must agree
+    # -- an off-by-one here would let the counter drift even though
+    # nothing ever moves on screen.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.rrc_line("msg", "sam", "hi")
+    g.rrc_line("msg", "sam", "there")
+    g._irq_up = 5
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 0, g._rrc_scroll_chat
+    print("ok test_trackball_up_is_a_noop_when_everything_already_fits")
+
+
+def test_trackball_up_then_down_returns_to_the_bottom():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(20):
+        g.rrc_line("msg", "sam", "line %02d" % i)
+    g._irq_up = 4
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 4, g._rrc_scroll_chat
+    g._irq_down = 4
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 0, g._rrc_scroll_chat
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)
+    assert "line 19" in _painted(g.tft.calls)
+    print("ok test_trackball_up_then_down_returns_to_the_bottom")
+
+
+def test_panel_open_leaves_room_scrollback_untouched_even_when_scrolled():
+    # Stronger version of test_trackball_inside_the_panel_scrolls_members_
+    # not_scrollback: that test starts from the default scroll (0), so a
+    # broken early-return that let events fall through to the new
+    # STATE_RRC_CHAT branch in _scroll_down would still read 0 == 0 and
+    # pass. Start from a nonzero scroll so a fallthrough would actually
+    # move it.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(20):
+        g.rrc_line("msg", "sam", "line %02d" % i)
+    g._irq_up = 3
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 3, g._rrc_scroll_chat
+
+    g._rrc_panel = True
+    g.rrc_members([(bytes([i]) * 16, "n%d" % i) for i in range(3)])
+    g._irq_down = 1
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 3, "panel-open trackball must not move room scrollback"
+    assert g._rrc_panel_idx == 1, g._rrc_panel_idx
+    print("ok test_panel_open_leaves_room_scrollback_untouched_even_when_scrolled")
+
+
+def test_new_message_resets_scroll_after_reading_back():
+    # Documents the interaction between the new trackball wiring and
+    # rrc_line()'s existing snap-to-bottom-on-arrival behaviour: reading
+    # back and then a message landing must not leave the scroll offset
+    # stranded pointing at nothing once the buffer moves under it.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(20):
+        g.rrc_line("msg", "sam", "line %02d" % i)
+    g._irq_up = 5
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 5, g._rrc_scroll_chat
+
+    g.rrc_line("msg", "sam", "line 20")   # a new message arrives mid-read
+    assert g._rrc_scroll_chat == 0, g._rrc_scroll_chat
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)
+    assert "line 20" in _painted(g.tft.calls)
+    print("ok test_new_message_resets_scroll_after_reading_back")
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):
