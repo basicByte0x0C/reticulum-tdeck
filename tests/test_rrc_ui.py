@@ -369,6 +369,166 @@ def test_back_parts_the_room_and_returns_to_the_console():
     print("ok test_back_parts_the_room_and_returns_to_the_console")
 
 
+def test_alt_w_opens_the_panel_and_takes_focus():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    import rrc_ui
+    rrc_ui.handle_key(g, ord("w"), b"\x1bw")     # alt+w arrives esc-prefixed
+    assert g._rrc_panel is True
+    # a letter no longer reaches the composer while the panel has focus
+    rrc_ui.handle_key(g, ord("x"), b"x")
+    assert g._rrc_input == ""
+    print("ok test_alt_w_opens_the_panel_and_takes_focus")
+
+
+def test_panel_lists_nick_or_question_mark_with_hash():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "sv2rck"), (b"\x22" * 16, None)])
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_member_panel(g)
+    # Every string but the [hash8] column comes back as _tb() glyph-index
+    # bytes now (ruling 2), so this uses the shared _painted() helper --
+    # same reasoning as test_room_browser_renders_hub_notices_verbatim and
+    # the rest of this file -- rather than a raw str.join over mixed
+    # str/bytes calls, which would TypeError before any assertion runs.
+    painted = _painted(g.tft.calls)
+    assert "sv2rck" in painted, painted
+    assert "[11111111]" in painted, painted
+    assert "?" in painted, painted
+    print("ok test_panel_lists_nick_or_question_mark_with_hash")
+
+
+def test_panel_wraps_a_cyrillic_nick_through_tb():
+    # Nicks are hub-controlled (K_NICK is whatever any peer in the room
+    # calls itself) -- attacker-controlled input that lands on screen the
+    # instant the panel opens. ui._ascii() KEEPS Cyrillic (ui._CYR) as a
+    # keep-filter, so a Cyrillic nick survives it and must go through
+    # ui._tb() before tft.text(), exactly like the Task 8 header fix.
+    # Without that wrap the raw str hits FakeTFT.text(), which does
+    # s.encode("ascii") and raises -- proven RED by temporarily dropping
+    # the ui._tb() wrap around the row's name draw (see task-9-report.md).
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "Варна")])
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_member_panel(g)                 # must not raise
+    assert any(c[0] == "text" and isinstance(c[1], (bytes, bytearray))
+               for c in g.tft.calls), g.tft.calls
+    print("ok test_panel_wraps_a_cyrillic_nick_through_tb")
+
+
+def test_panel_click_inserts_the_mention_and_closes():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])
+    g.on_rrc_mention = lambda h: "@sv2rck"
+    import rrc_ui
+    rrc_ui.panel_click(g)
+    assert g._rrc_input == "@sv2rck "
+    assert g._rrc_panel is False
+    print("ok test_panel_click_inserts_the_mention_and_closes")
+
+
+def test_panel_scroll_clamps_on_an_empty_roster():
+    # An empty roster must not push _rrc_panel_idx negative or past the
+    # (nonexistent) end -- the next draw_member_panel() dereferences it.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([])
+    import rrc_ui
+    rrc_ui.panel_scroll(g, 1)
+    rrc_ui.panel_scroll(g, -1)
+    assert g._rrc_panel_idx == 0
+    rrc_ui.draw_member_panel(g)                 # must not raise/IndexError
+    print("ok test_panel_scroll_clamps_on_an_empty_roster")
+
+
+def test_panel_scroll_clamps_at_the_roster_ends():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(bytes([i]) * 16, "n%d" % i) for i in range(3)])
+    import rrc_ui
+    for _ in range(5):                          # walk well past the top
+        rrc_ui.panel_scroll(g, -1)
+    assert g._rrc_panel_idx == 0
+    for _ in range(5):                          # walk well past the bottom
+        rrc_ui.panel_scroll(g, 1)
+    assert g._rrc_panel_idx == 2
+    rrc_ui.draw_member_panel(g)                 # must not raise/IndexError
+    print("ok test_panel_scroll_clamps_at_the_roster_ends")
+
+
+def test_panel_scroll_clamps_when_the_roster_is_shorter_than_the_view():
+    # Fewer members than PANEL_ROWS: the scroll offset must stay pinned
+    # at 0, or a later-arriving roster (which sizes _rrc_panel_idx down
+    # via rrc_members()) could leave _rrc_panel_scroll stranded above it.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])
+    import rrc_ui
+    rrc_ui.panel_scroll(g, 1)
+    assert g._rrc_panel_scroll == 0, g._rrc_panel_scroll
+    print("ok test_panel_scroll_clamps_when_the_roster_is_shorter_than_the_view")
+
+
+def test_rrc_members_clamps_panel_idx_when_the_roster_shrinks():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(bytes([i]) * 16, "n%d" % i) for i in range(3)])
+    g._rrc_panel_idx = 2
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])    # roster shrank to one member
+    assert g._rrc_panel_idx == 0, g._rrc_panel_idx
+    print("ok test_rrc_members_clamps_panel_idx_when_the_roster_shrinks")
+
+
+def test_trackball_inside_the_panel_scrolls_members_not_scrollback():
+    # Full entry point (handle_trackball), not the bare module function --
+    # this is the wiring the panel's "takes focus" claim actually rests on.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(bytes([i]) * 16, "n%d" % i) for i in range(3)])
+    before_scroll_chat = g._rrc_scroll_chat
+    g._irq_down = 1
+    g.handle_trackball()
+    assert g._rrc_panel_idx == 1, g._rrc_panel_idx
+    assert g._rrc_scroll_chat == before_scroll_chat
+    print("ok test_trackball_inside_the_panel_scrolls_members_not_scrollback")
+
+
+def test_trackball_click_inside_the_panel_inserts_mention_via_handle_trackball():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])
+    g.on_rrc_mention = lambda h: "@sv2rck"
+    g._irq_click = 1
+    g.handle_trackball()
+    assert g._rrc_input == "@sv2rck "
+    assert g._rrc_panel is False
+    print("ok test_trackball_click_inside_the_panel_inserts_mention_via_handle_trackball")
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):

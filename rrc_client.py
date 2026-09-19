@@ -174,8 +174,17 @@ def _remember(src, nick):
 
 
 def _roster_changed():
-    if _gui is not None:
-        _gui.rrc_roster(len(_roster))
+    """Push both the cheap count (room header) and the full snapshot (the
+    member panel) -- _gui.rrc_roster() alone predates the panel and its
+    callers still depend on it firing every time the roster changes."""
+    if _gui is None:
+        return
+    _gui.rrc_roster(len(_roster))
+    members = []
+    for src in _roster:
+        members.append((src, _roster[src]))
+    members.sort(key=lambda m: (m[1] is None, (m[1] or "").lower()))
+    _gui.rrc_members(members)
 
 
 def _on_packet(data, packet=None):

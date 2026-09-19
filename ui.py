@@ -648,6 +648,7 @@ class UI:
         self.on_rrc_part = None         # () -> None
         self.on_rrc_disconnect = None   # () -> None
         self.on_rrc_seed = None         # () -> None
+        self.on_rrc_mention = None      # (identity_hash) -> "@token" string
 
         self.rrc_hubs = {}              # dest_hash -> {"name", "hops", "seen"}
         self._rrc_keys = []             # hub order, newest announce last
@@ -663,6 +664,7 @@ class UI:
         self._rrc_panel = False         # member panel open (alt+w)
         self._rrc_panel_idx = 0
         self._rrc_panel_scroll = 0
+        self._rrc_roster = []           # [(identity_hash, nick_or_None), ...]
         self._rrc_prompt = False
 
     # --- Screen power management ---
@@ -2093,6 +2095,20 @@ class UI:
         self._rrc_members = count
         self.dirty = True
 
+    def rrc_members(self, members):
+        """Roster snapshot: [(identity_hash, nick_or_None), ...]. The member
+        panel (rrc_ui.draw_member_panel) reads ui._rrc_roster directly; the
+        selection has to be re-clamped here too, or a roster that shrank
+        while the panel was open leaves _rrc_panel_idx pointing past the
+        end for the next draw."""
+        self._rrc_roster = members
+        self._rrc_members = len(members)
+        if self._rrc_panel_idx >= len(members):
+            self._rrc_panel_idx = max(0, len(members) - 1)
+        if self._rrc_panel_scroll > self._rrc_panel_idx:
+            self._rrc_panel_scroll = self._rrc_panel_idx
+        self.dirty = True
+
     def rrc_joined(self, room):
         self._rrc_room = room
         self.state = STATE_RRC_CHAT
@@ -3382,6 +3398,20 @@ class UI:
             return True
 
         self.wake_screen()
+
+        # The focused member panel (alt+w) takes the trackball entirely
+        # while open: scroll members, click to mention, no page/tab
+        # switching and no scrollback movement underneath it.
+        if self.state == STATE_RRC_CHAT and self._rrc_panel:
+            import rrc_ui
+            if up:
+                rrc_ui.panel_scroll(self, -up)
+            if down:
+                rrc_ui.panel_scroll(self, down)
+            if click:
+                rrc_ui.panel_click(self)
+            self.dirty = True
+            return True
 
         # Diagonal-roll jitter: the ball emits stray pulses on the other
         # axis — only the dominant axis of this drain cycle counts

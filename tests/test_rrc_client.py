@@ -28,6 +28,7 @@ class FakeGui:
         self.cleared = 0
         self.status = []
         self._wake_mode = 0
+        self.members = []           # rrc_members() snapshots, newest last
 
     def add_rrc_hub(self, dest_hash, name=None, hops=None):
         self.hubs.append((dest_hash, name, hops))
@@ -43,6 +44,12 @@ class FakeGui:
 
     def rrc_closed(self):
         pass
+
+    def rrc_members(self, members):
+        # _roster_changed() calls this alongside rrc_roster() on every
+        # roster change (Task 9) -- every FakeGui needs it or the fixture
+        # crashes, not just the ones with a _session()-installed override.
+        self.members.append(members)
 
 
 def _reset():
@@ -173,6 +180,30 @@ def test_joined_body_seeds_the_roster():
     assert b"\x99" * 16 not in rrc_client._roster, "stale member survived the reseed"
     assert g.rosters[-1] == 3
     print("ok test_joined_body_seeds_the_roster")
+
+
+def test_roster_changed_pushes_both_the_count_and_the_member_snapshot():
+    # Task 9 rewrote _roster_changed() to call rrc_members() alongside the
+    # existing rrc_roster() -- both must fire on the same change, or either
+    # the room header (count) or the member panel (snapshot) goes stale.
+    # This also pins the sort: named members first (case-insensitively),
+    # unnamed (never-spoken, nick is None) last -- the shape the panel
+    # renders as "nick or ?" in list order.
+    g, link = _session()
+    rrc_client._roster = {
+        b"\x33" * 16: None,
+        b"\x11" * 16: "Sam",
+        b"\x22" * 16: "kc1awv",
+    }
+    rrc_client._roster_changed()
+    assert g.rosters[-1] == 3, g.rosters
+    snap = g.members[-1]
+    assert snap == [
+        (b"\x22" * 16, "kc1awv"),
+        (b"\x11" * 16, "Sam"),
+        (b"\x33" * 16, None),
+    ], snap
+    print("ok test_roster_changed_pushes_both_the_count_and_the_member_snapshot")
 
 
 def test_joined_event_adds_a_member_and_parted_removes_one():

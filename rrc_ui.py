@@ -109,6 +109,24 @@ def _draw_footer(ui):
 
 
 def handle_key(ui, ch, key):
+    if ui.state == STATE_RRC_CHAT:
+        # alt+w toggles the member panel. A bare (w) cannot: every letter
+        # key belongs to the composer, and enter sends it. How alt arrives
+        # from the tca8418 driver (esc-prefixed, here) is unverified --
+        # Task 10's hardware boot-test is the check; if the driver reports
+        # it differently this is a one-line fix.
+        if key == b"\x1bw" or key == b"\x1bW":
+            ui._rrc_panel = not ui._rrc_panel
+            ui._rrc_panel_idx = 0
+            ui._rrc_panel_scroll = 0
+            ui.dirty = True
+            return True
+        if ui._rrc_panel:
+            if ch == 27:
+                ui._rrc_panel = False
+                ui.dirty = True
+                return True
+            return True          # panel holds focus; keys do not compose
     if ui._rrc_prompt:
         return _handle_prompt_key(ui, ch, key)
     if ui.state == STATE_RRC_ROOMS:
@@ -174,6 +192,130 @@ def _handle_prompt_key(ui, ch, key):
         ui.dirty = True
         return True
     return False
+
+
+# Focused member panel (alt+w). Drawn with graphics primitives -- fill_rect
+# for the body, drawn rules for the frame, SEL_BG strips for the title and
+# footer, a selection fill plus a magenta accent bar, and a track/thumb
+# scrollbar -- never box-drawing characters: the app has a display driver,
+# so the panel looks like the rest of the UI rather than ASCII art.
+#
+# Geometry is derived from the constants this module already imports from
+# ui (SCREEN_W, CHAR_W, CHAR_H), which are themselves board-aware (the Pro
+# is 30 columns and a different screen height) -- so nothing here hardcodes
+# the v1's 320x240. The row/height counts below (7 rows, 158px) are sized
+# for the v1's panel and verified against the host harness's bounds check;
+# the Pro gets a boot-test pass in Task 10.
+PANEL_X = 8
+PANEL_W = SCREEN_W - 16
+PANEL_Y = 58
+PANEL_H = 158
+PANEL_ROWS = 7
+_PANEL_TEXT_X = PANEL_X + 8
+_PANEL_HASH_X = PANEL_X + PANEL_W - 8 - 10 * CHAR_W
+
+
+def draw_member_panel(ui):
+    """Focused, scrollable member list drawn with graphics primitives.
+
+    Rows are "nick or ?" plus a right-aligned [hash8], the same shape
+    _draw_list_rows() uses for peers and hubs. No op/voice markers: rrcd
+    exposes no member status to clients, so a "@"/"+" marker would be
+    inventing data the protocol does not carry.
+    """
+    roster = ui._rrc_roster
+    ui.tft.fill_rect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, ui.BG_DARK)
+    for i in range(2):               # 2px frame
+        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + i, PANEL_W - 2 * i, 1, ui.NEON_CYAN)
+        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + PANEL_H - 1 - i,
+                         PANEL_W - 2 * i, 1, ui.NEON_CYAN)
+        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + i, 1, PANEL_H - 2 * i, ui.NEON_CYAN)
+        ui.tft.fill_rect(PANEL_X + PANEL_W - 1 - i, PANEL_Y + i, 1,
+                         PANEL_H - 2 * i, ui.NEON_CYAN)
+
+    ui.tft.fill_rect(PANEL_X + 2, PANEL_Y + 2, PANEL_W - 4, 18, ui.SEL_BG)
+    # Every string this panel draws goes through ui._tb() -- room name and
+    # nicks are hub-controlled (K_ROOM / K_NICK) and a kept Cyrillic char
+    # must take the glyph-index path, same as the Task 8 header fix; the
+    # static labels are wrapped too, for consistency, even though they are
+    # only ever ASCII. The [hash8] column below is the one deliberate
+    # exception -- see its comment.
+    ui.tft.text(ui.font, ui._tb(_ascii(ui._rrc_room or "?")[:14]), _PANEL_TEXT_X,
+                PANEL_Y + 3, ui.YELLOW, ui.SEL_BG)
+    count = "%d users" % len(roster)
+    ui.tft.text(ui.font, ui._tb(count), PANEL_X + PANEL_W - 8 - len(count) * CHAR_W,
+                PANEL_Y + 3, ui.DIM_CYAN, ui.SEL_BG)
+    ui.tft.fill_rect(PANEL_X + 2, PANEL_Y + 20, PANEL_W - 4, 1, ui.DIM_CYAN)
+
+    top = ui._rrc_panel_scroll
+    for i in range(PANEL_ROWS):
+        y = PANEL_Y + 22 + i * CHAR_H
+        idx = top + i
+        if idx >= len(roster):
+            break
+        src, nick = roster[idx]
+        selected = (idx == ui._rrc_panel_idx)
+        if selected:
+            ui.tft.fill_rect(PANEL_X + 2, y, PANEL_W - 4 - 6, CHAR_H, ui.SEL_BG)
+            ui.tft.fill_rect(PANEL_X + 2, y, 3, CHAR_H, ui.NEON_MAG)
+        bg = ui.SEL_BG if selected else ui.BG_DARK
+        # A member who has never spoken is known only by hash -- the app's
+        # existing convention for an unknown name is "?".
+        name = _ascii(nick) if nick else "?"
+        ui.tft.text(ui.font, ui._tb(name[:20]), _PANEL_TEXT_X, y,
+                    ui.YELLOW if selected else ui.NEON_CYAN, bg)
+        # [hash8] is hex from bytes.hex() -- always ASCII, so it
+        # deliberately skips ui._tb() rather than being left out by
+        # oversight.
+        ui.tft.text(ui.font, "[" + src.hex()[:8] + "]", _PANEL_HASH_X, y,
+                    ui.DIM_CYAN, bg)
+
+    track_y = PANEL_Y + 22
+    track_h = PANEL_ROWS * CHAR_H
+    ui.tft.fill_rect(PANEL_X + PANEL_W - 6, track_y, 4, track_h, ui.BG_DARK)
+    if len(roster) > PANEL_ROWS:
+        bar_h = max(6, track_h * PANEL_ROWS // len(roster))
+        bar_y = track_y + track_h * top // len(roster)
+        ui.tft.fill_rect(PANEL_X + PANEL_W - 6, bar_y, 4, bar_h, ui.NEON_CYAN)
+
+    foot_y = PANEL_Y + PANEL_H - 22
+    ui.tft.fill_rect(PANEL_X + 2, foot_y, PANEL_W - 4, 20, ui.SEL_BG)
+    ui.tft.text(ui.font, ui._tb("alt+w close"), _PANEL_TEXT_X, foot_y + 2,
+                ui.NEON_GREEN, ui.SEL_BG)
+    hint = "click = mention"
+    ui.tft.text(ui.font, ui._tb(hint), PANEL_X + PANEL_W - 8 - len(hint) * CHAR_W,
+                foot_y + 2, ui.DIM_CYAN, ui.SEL_BG)
+
+
+def panel_click(ui):
+    """Trackball click in the panel: insert the mention, close the panel."""
+    roster = ui._rrc_roster
+    if not roster or not (0 <= ui._rrc_panel_idx < len(roster)):
+        return False
+    src = roster[ui._rrc_panel_idx][0]
+    token = ui.on_rrc_mention(src) if ui.on_rrc_mention else "@" + src.hex()[:8]
+    ui._rrc_input += token + " "
+    ui._rrc_panel = False
+    ui.dirty = True
+    return True
+
+
+def panel_scroll(ui, delta):
+    """Move the panel selection by delta rows, clamped to the roster, and
+    keep the visible window (ui._rrc_panel_scroll) tracking it. Called for
+    both single trackball ticks and multi-tick drains, so delta may be
+    more than 1 in either direction."""
+    roster = ui._rrc_roster
+    if not roster:
+        ui._rrc_panel_idx = 0
+        ui._rrc_panel_scroll = 0
+        return
+    ui._rrc_panel_idx = max(0, min(len(roster) - 1, ui._rrc_panel_idx + delta))
+    if ui._rrc_panel_idx < ui._rrc_panel_scroll:
+        ui._rrc_panel_scroll = ui._rrc_panel_idx
+    elif ui._rrc_panel_idx >= ui._rrc_panel_scroll + PANEL_ROWS:
+        ui._rrc_panel_scroll = ui._rrc_panel_idx - PANEL_ROWS + 1
+    ui.dirty = True
 
 
 def draw_room(ui):
