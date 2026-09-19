@@ -499,6 +499,54 @@ def test_rrc_members_clamps_panel_idx_when_the_roster_shrinks():
     print("ok test_rrc_members_clamps_panel_idx_when_the_roster_shrinks")
 
 
+def test_roster_shrink_does_not_strand_the_panel_past_the_members():
+    # Review finding: the first pass clamped _rrc_panel_scroll against
+    # _rrc_panel_idx (the selection) instead of against the panel's actual
+    # valid top-of-window range. A mass PART can shrink the roster to fewer
+    # members than fit on screen while both idx and scroll are still deep
+    # in a long list; clamping scroll to idx alone leaves it stranded above
+    # 0 even though every remaining member would now fit from scroll=0.
+    # This needs BOTH a stale nonzero scroll and a shrink past it in the
+    # same call -- none of the other clamp tests combine those two, which
+    # is exactly why this slipped through the first pass.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    big = [(bytes([i]) * 16, "n%d" % i) for i in range(20)]
+    g.rrc_members(big)
+    g._rrc_panel_idx = 19          # scrolled to the bottom of a long roster
+    g._rrc_panel_scroll = 13
+    g.rrc_members(big[:6])         # mass PART: 6 members, 7 rows visible
+    assert g._rrc_panel_scroll == 0, g._rrc_panel_scroll
+    assert g._rrc_panel_idx == 5, g._rrc_panel_idx
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_member_panel(g)
+    painted = _painted(g.tft.calls)
+    for nick in ("n0", "n1", "n2", "n3", "n4", "n5"):
+        assert nick in painted, (nick, painted)
+    print("ok test_roster_shrink_does_not_strand_the_panel_past_the_members")
+
+
+def test_draw_room_paints_the_panel_when_it_is_open():
+    # Minor 1: every other panel test calls draw_member_panel() directly.
+    # draw_room()'s "if ui._rrc_panel: draw_member_panel(ui)" dispatch is
+    # the only thing connecting panel-open state to the panel actually
+    # painting, and nothing exercised it.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "sv2rck" in painted, painted
+    print("ok test_draw_room_paints_the_panel_when_it_is_open")
+
+
 def test_trackball_inside_the_panel_scrolls_members_not_scrollback():
     # Full entry point (handle_trackball), not the bare module function --
     # this is the wiring the panel's "takes focus" claim actually rests on.

@@ -200,12 +200,14 @@ def _handle_prompt_key(ui, ch, key):
 # scrollbar -- never box-drawing characters: the app has a display driver,
 # so the panel looks like the rest of the UI rather than ASCII art.
 #
-# Geometry is derived from the constants this module already imports from
-# ui (SCREEN_W, CHAR_W, CHAR_H), which are themselves board-aware (the Pro
-# is 30 columns and a different screen height) -- so nothing here hardcodes
-# the v1's 320x240. The row/height counts below (7 rows, 158px) are sized
-# for the v1's panel and verified against the host harness's bounds check;
-# the Pro gets a boot-test pass in Task 10.
+# Only PANEL_W derives from board geometry (SCREEN_W, itself board-aware --
+# the Pro is 240px/30 columns wide). PANEL_Y, PANEL_H and PANEL_ROWS below
+# are fixed constants sized for the v1's 320x240 landscape panel and
+# verified against the host harness's bounds check; they do not scale with
+# SCREEN_H, so the Pro's taller 320px portrait screen leaves unused space
+# below the panel rather than showing more rows. That's deliberately not
+# exploited here -- it belongs with the Pro's own boot-test pass, not this
+# task -- and the arithmetic still stays in bounds on the Pro either way.
 PANEL_X = 8
 PANEL_W = SCREEN_W - 16
 PANEL_Y = 58

@@ -2100,13 +2100,23 @@ class UI:
         panel (rrc_ui.draw_member_panel) reads ui._rrc_roster directly; the
         selection has to be re-clamped here too, or a roster that shrank
         while the panel was open leaves _rrc_panel_idx pointing past the
-        end for the next draw."""
+        end for the next draw.
+
+        The scroll offset is clamped against the top of the valid window
+        (len(members) - PANEL_ROWS), not against the selection index: a
+        mass PART can shrink the roster to fewer members than fit on
+        screen while idx and scroll are both still deep in a long list, and
+        clamping scroll to idx would leave it stranded above 0, hiding
+        members that now fit. Clamp scroll first, then idx, so both land
+        correctly regardless of which was further out of range."""
+        import rrc_ui
         self._rrc_roster = members
         self._rrc_members = len(members)
+        max_scroll = max(0, len(members) - rrc_ui.PANEL_ROWS)
+        if self._rrc_panel_scroll > max_scroll:
+            self._rrc_panel_scroll = max_scroll
         if self._rrc_panel_idx >= len(members):
             self._rrc_panel_idx = max(0, len(members) - 1)
-        if self._rrc_panel_scroll > self._rrc_panel_idx:
-            self._rrc_panel_scroll = self._rrc_panel_idx
         self.dirty = True
 
     def rrc_joined(self, room):
