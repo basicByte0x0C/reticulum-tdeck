@@ -42,6 +42,15 @@ def test_hub_list_holds_sixteen_and_drops_the_oldest():
     for i in range(20):
         g.add_rrc_hub(bytes([i]) * 16, name="hub%d" % i, hops=1)
     assert len(g._rrc_keys) == 16
+    # The backing dict must shrink with the key list, or it leaks.
+    assert len(g.rrc_hubs) == 16
+    # Oldest four evicted, newest retained -- not merely "some sixteen".
+    assert bytes([0]) * 16 not in g.rrc_hubs
+    assert bytes([3]) * 16 not in g.rrc_hubs
+    assert bytes([4]) * 16 in g.rrc_hubs
+    assert bytes([19]) * 16 in g.rrc_hubs
+    assert g._rrc_keys[0] == bytes([4]) * 16
+    assert g._rrc_keys[-1] == bytes([19]) * 16
     print("ok test_hub_list_holds_sixteen_and_drops_the_oldest")
 
 
@@ -50,6 +59,7 @@ def test_rrc_line_appends_to_scrollback_and_is_bounded():
     for i in range(200):
         g.rrc_line("msg", "sam", "line %d" % i)
     assert len(g._rrc_lines) <= U.RRC_SCROLLBACK
+    assert g._rrc_lines[0][2] == "line 80"
     assert g._rrc_lines[-1][2] == "line 199"
     print("ok test_rrc_line_appends_to_scrollback_and_is_bounded")
 
