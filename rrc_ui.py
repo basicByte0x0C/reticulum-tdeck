@@ -9,10 +9,9 @@
 # prose is painted as prose. That is why there is no parser here.
 
 from ui import (BODY_Y, CHAR_H, CHAR_W, COLS, INPUT_Y, SCREEN_W,
-                BODY_ROWS, STATE_NODES, STATE_RRC_ROOMS,
+                BODY_ROWS, STATE_NODES, STATE_RRC_CHAT, STATE_RRC_ROOMS,
                 TAB_RRC, _pad, _ascii)
-# SCREEN_H, SEP_Y and STATE_RRC_CHAT are unused here -- Task 8's room view
-# re-imports what it needs when it lands.
+# SCREEN_H and SEP_Y are unused here.
 
 
 def open_selected_hub(ui):
@@ -31,13 +30,21 @@ def open_selected_hub(ui):
 
 
 def _draw_header(ui, left, right):
-    ui.tft.text(ui.font, _pad(""), 0, BODY_Y, ui.DIM_CYAN, ui.BG_DARK)
-    ui.tft.text(ui.font, "<", 0, BODY_Y, ui.NEON_GREEN, ui.BG_DARK)
-    ui.tft.text(ui.font, _ascii(left)[:COLS - len(right) - 3], CHAR_W, BODY_Y,
-                ui.NEON_CYAN, ui.BG_DARK)
-    if right:
-        x = (COLS - len(right) - 1) * CHAR_W
-        ui.tft.text(ui.font, right, x, BODY_Y, ui.DIM_CYAN, ui.BG_DARK)
+    # Cached like draw_browser's header -- the key covers everything the
+    # row shows, so a hub-name or status change still repaints it.
+    cache_key = left + "\x01" + right
+    if ui._cache[1] != cache_key:
+        ui._cache[1] = cache_key
+        ui.tft.text(ui.font, _pad(""), 0, BODY_Y, ui.DIM_CYAN, ui.BG_DARK)
+        ui.tft.text(ui.font, "<", 0, BODY_Y, ui.NEON_GREEN, ui.BG_DARK)
+        # left is hub-controlled (announced hub name); _tb() carries it
+        # through the same glyph-index path _row() uses, so a kept
+        # Cyrillic char doesn't hit tft.text() as a raw non-ASCII str.
+        ui.tft.text(ui.font, ui._tb(_ascii(left)[:COLS - len(right) - 3]),
+                    CHAR_W, BODY_Y, ui.NEON_CYAN, ui.BG_DARK)
+        if right:
+            x = (COLS - len(right) - 1) * CHAR_W
+            ui.tft.text(ui.font, right, x, BODY_Y, ui.DIM_CYAN, ui.BG_DARK)
     ui.tft.fill_rect(0, BODY_Y + CHAR_H - 1, SCREEN_W, 1, ui.DIM_CYAN)
 
 
@@ -117,6 +124,29 @@ def handle_key(ui, ch, key):
             ui.node_tab = TAB_RRC
             ui.dirty = True
             return True
+    if ui.state == STATE_RRC_CHAT:
+        if ch == 13:                     # enter sends the composer line
+            text = ui._rrc_input.strip()
+            ui._rrc_input = ""
+            ui.dirty = True
+            if text and ui.on_rrc_say:
+                ui.on_rrc_say(text)
+            return True
+        if ch == 8:
+            ui._rrc_input = ui._rrc_input[:-1]
+            ui.dirty = True
+            return True
+        if ch == 27:                     # esc leaves the room, keeps the link
+            if ui.on_rrc_part:
+                ui.on_rrc_part()
+            ui.state = STATE_RRC_ROOMS
+            ui._rrc_panel = False
+            ui.dirty = True
+            return True
+        if 32 <= ch < 127 and len(ui._rrc_input) < COLS - 2:
+            ui._rrc_input += chr(ch)
+            ui.dirty = True
+            return True
     return False
 
 
@@ -147,5 +177,36 @@ def _handle_prompt_key(ui, ch, key):
 
 
 def draw_room(ui):
-    """Filled in by Task 8."""
-    draw_rooms(ui)
+    """Room scrollback plus the composer."""
+    room = ui._rrc_room or "?"
+    count = ("%d users" % ui._rrc_members) if ui._rrc_members else "? users"
+    name = _ascii(room)[:COLS - len(count) - 2]
+    # Cached like _draw_header/draw_browser's header -- the key covers
+    # both the room name and the member count, so either changing repaints.
+    cache_key = name + "\x01" + count
+    if ui._cache[1] != cache_key:
+        ui._cache[1] = cache_key
+        ui.tft.text(ui.font, _pad(""), 0, BODY_Y, ui.NEON_CYAN, ui.BG_DARK)
+        # room is hub-controlled (echoed by the JOIN reply); _tb() carries
+        # it through the same glyph-index path _row() uses.
+        ui.tft.text(ui.font, ui._tb(name), 0, BODY_Y, ui.NEON_CYAN, ui.BG_DARK)
+        ui.tft.text(ui.font, count, (COLS - len(count) - 1) * CHAR_W, BODY_Y,
+                    ui.DIM_CYAN, ui.BG_DARK)
+    ui.tft.fill_rect(0, BODY_Y + CHAR_H - 1, SCREEN_W, 1, ui.DIM_CYAN)
+
+    rows = BODY_ROWS - 1
+    lines = _visible_lines(ui, rows)
+    for i in range(rows):
+        y = BODY_Y + (i + 1) * CHAR_H
+        if i < len(lines):
+            kind, text = lines[i]
+            ui._draw_row_cached(i + 2, _pad(text), y, _line_color(ui, kind))
+        else:
+            ui._draw_row_cached(i + 2, "", y, ui.NEON_CYAN)
+
+    if ui._rrc_panel:
+        draw_member_panel(ui)          # Task 9
+
+    prompt = "> " + ui._rrc_input
+    ui.tft.text(ui.font, _pad(prompt)[:COLS], 0, INPUT_Y,
+                ui.DIM_CYAN if ui._rrc_panel else ui.NEON_CYAN, ui.BG_DARK)

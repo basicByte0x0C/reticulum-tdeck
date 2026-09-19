@@ -249,6 +249,86 @@ def test_delete_on_rrc_tab_forgets_a_hub_not_a_listener():
     print("ok test_delete_on_rrc_tab_forgets_a_hub_not_a_listener")
 
 
+def test_room_view_shows_room_and_member_count():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_members = 12
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "#varna" in painted, painted
+    assert "12 users" in painted, painted
+    print("ok test_room_view_shows_room_and_member_count")
+
+
+def test_room_view_prefixes_messages_and_marks_actions():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.rrc_line("msg", "kc1awv", "anyone on 868?")
+    g.rrc_line("action", "sam", "waves")
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "kc1awv> anyone on 868?" in painted, painted
+    assert "* sam waves" in painted, painted
+    print("ok test_room_view_prefixes_messages_and_marks_actions")
+
+
+def test_typing_and_enter_sends_through_on_rrc_say():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    said = []
+    g.on_rrc_say = lambda text: said.append(text)
+    import rrc_ui
+    for ch in "gm":
+        rrc_ui.handle_key(g, ord(ch), ch.encode())
+    rrc_ui.handle_key(g, 13, b"\r")
+    assert said == ["gm"], said
+    assert g._rrc_input == ""
+    print("ok test_typing_and_enter_sends_through_on_rrc_say")
+
+
+def test_empty_enter_does_not_send():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    said = []
+    g.on_rrc_say = lambda text: said.append(text)
+    import rrc_ui
+    rrc_ui.handle_key(g, 13, b"\r")
+    assert said == [], said
+    assert g._rrc_input == ""
+    print("ok test_empty_enter_does_not_send")
+
+
+def test_backspace_on_empty_input_is_a_noop():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    import rrc_ui
+    rrc_ui.handle_key(g, 8, b"\x08")   # must not raise or go negative
+    assert g._rrc_input == ""
+    print("ok test_backspace_on_empty_input_is_a_noop")
+
+
+def test_back_parts_the_room_and_returns_to_the_console():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    parted = []
+    g.on_rrc_part = lambda: parted.append(True)
+    import rrc_ui
+    rrc_ui.handle_key(g, 27, b"\x1b")
+    assert parted == [True]
+    assert g.state == U.STATE_RRC_ROOMS
+    print("ok test_back_parts_the_room_and_returns_to_the_console")
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):
