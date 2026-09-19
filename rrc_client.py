@@ -193,7 +193,7 @@ def _on_packet(data, packet=None):
     Structured fields only: every NOTICE the hub sends is rendered as
     text rather than parsed, because its wording is an unversioned
     formatting choice that differs between hub implementations."""
-    global _state, _limits, _hub_name, _no_retry, _backoff_until
+    global _state, _limits, _hub_name, _no_retry, _backoff_until, _room
 
     env = P.parse(data)
     if env is None:
@@ -230,16 +230,33 @@ def _on_packet(data, packet=None):
         return
 
     if t == P.T_JOINED:
-        if _state != JOINED:
-            # Our own JOIN reply: the body is the room's entire member
-            # list, and there is no nick -- it is not an arrival event.
+        room = env.get(P.K_ROOM)
+        # Our own JOIN reply, or somebody else arriving?
+        #
+        # _state alone is not enough: slash commands reach the hub verbatim
+        # (that is what makes its command set free), so a "/join #other"
+        # typed in the composer joins us without join() ever running, and
+        # the reply lands while _state is already JOINED. Read as an
+        # arrival, it left _room pointing at the old room -- every later
+        # send carried the wrong K_ROOM, the header lied and the roster was
+        # polluted. Our own reply always echoes the room we asked for, so a
+        # *named* room that is not the one we are in can only be our own.
+        #
+        # The isinstance() guard is load-bearing: a hub that omits K_ROOM
+        # from its arrival broadcasts would otherwise have every arrival
+        # look like a join and wipe the roster.
+        if _state != JOINED or (isinstance(room, str) and room != _room):
+            # The body is the room's entire member list, and there is no
+            # nick -- it is not an arrival event.
             _roster.clear()
             if isinstance(body, list):
                 for member in body:
                     _remember(member, None)
+            if isinstance(room, str) and room:
+                _room = room          # adopt whatever the hub echoed
             _state = JOINED
             if _gui is not None:
-                _gui.rrc_joined(env.get(P.K_ROOM))
+                _gui.rrc_joined(room)
         else:
             # Somebody else arrived. K_SRC is the hub; the body carries
             # the one identity that actually joined, and K_NICK names it.
@@ -326,11 +343,21 @@ def say(text):
     """Send composer text to the joined room.
 
     "/me ..." becomes ACTION; every other slash string goes as MSG, which
-    is what makes the hub's whole command set free."""
-    if _state != JOINED or not text:
+    is what makes the hub's whole command set free.
+
+    Every refusal reports into the scrollback, not just through _status():
+    the room view renders the scrollback and does not render the status
+    line, so a message refused during a rate-limit backoff used to vanish
+    without a trace -- rrc_ui clears the composer regardless of what this
+    returns."""
+    if not text:
+        return False
+    if _state != JOINED:
+        _line("error", None, "not sent: not in a room")
         return False
     if time.time() < _backoff_until:
         _status("rate limited - hold on")
+        _line("error", None, "not sent: rate limited")
         return False
     t = P.T_MSG
     body = text
@@ -344,9 +371,27 @@ def say(text):
         while body and len(body.encode("utf-8")) > cap:
             body = body[:-1]
         if not body:
+            _line("error", None, "not sent: no room in the budget")
             return False
-    return _send_env(P.make_envelope(t, src=_my_identity.hash, room=_room,
-                                     body=body, nick=_nick()))
+    env = P.make_envelope(t, src=_my_identity.hash, room=_room,
+                          body=body, nick=_nick())
+    # Echo locally, and pre-seed the dedupe with our own K_ID.
+    #
+    # Whether rrcd fans a message back to its sender is settled by neither
+    # the spec nor the plan. This is correct either way: if the hub echoes
+    # the envelope, _seen() suppresses the duplicate; if it does not, the
+    # user still sees what they sent instead of typing into a void. It is
+    # also the app's existing idiom -- _handle_key_chat echoes locally
+    # before calling on_send.
+    _seen(env[P.K_ID])
+    _line("msg" if t == P.T_MSG else "action", _nick(), body)
+    ok = _send_env(env)
+    if not ok:
+        # _send_env only reports through _status(), which the room view
+        # does not render -- and the echo above has already told the user
+        # the message exists.
+        _line("error", None, "not sent: send failed")
+    return ok
 
 
 def join(room, key=None):
@@ -384,6 +429,16 @@ def part():
 def disconnect():
     """Tear the session down: PART the room, then close the link."""
     global _link, _state, _room, _limits, _hub_name
+    # Cancel any session task still in flight FIRST. Backing out during
+    # "finding path..." or "linking..." used to leave the task running: it
+    # went on to establish the link, identify, send HELLO, reassign _link,
+    # and on WELCOME call _gui.rrc_welcome() -- which forces
+    # state = STATE_RRC_ROOMS and yanks the user out of whatever unrelated
+    # LXMF conversation they had moved on to. It also left a link nobody
+    # would tear down, paying LoRa airtime against the on-demand-session
+    # decision. Bumping the generation makes _stale() true, and each early
+    # return in _session_task tears down what it owns.
+    _task_gen_next()
     if _state == JOINED:
         part()
     link = _link
@@ -409,6 +464,26 @@ def _task_gen_next():
 
 def _stale(my_gen):
     return my_gen != _task_gen
+
+
+def _drop_link(link):
+    """Tear down a link this task owns but is abandoning.
+
+    _link is cleared first when it names this link, the way disconnect()
+    does: teardown() fires the closed callback synchronously, and giving up
+    on a link deliberately must not be painted at the user as a dropped
+    one. Called from every _stale() early return that has a link or a
+    candidate in hand -- otherwise an abandoned session leaves a live link
+    on the hub that nobody will ever close."""
+    global _link
+    if link is None:
+        return
+    if _link is link:
+        _link = None
+    try:
+        link.teardown()
+    except Exception:
+        pass
 
 
 def connect(dest_hash):
@@ -487,10 +562,7 @@ async def _session_task(dest_hash):
                     time.time() - t0 < per_attempt:
                 await asyncio.sleep_ms(200)
                 if _stale(my_gen):
-                    try:
-                        candidate.teardown()
-                    except Exception:
-                        pass
+                    _drop_link(candidate)
                     return
             if candidate.status == OutgoingLink.ACTIVE:
                 link = candidate
@@ -512,6 +584,15 @@ async def _session_task(dest_hash):
         link.set_packet_callback(_on_packet)
         link.identify(_my_identity)
         await asyncio.sleep_ms(200)
+        if _stale(my_gen):
+            # Backed out while identifying. Today disconnect() has already
+            # cleared and torn down _link by the time we get here, so this
+            # is belt-and-braces -- but it is what makes the invariant
+            # true unconditionally: a task that goes stale never leaves the
+            # link it owns open, and never walks on to HELLO and the
+            # WELCOME wait on a session nobody is waiting for.
+            _drop_link(link)
+            return
 
         _status("waiting for WELCOME...")
         hello_body = {P.B_HELLO_NAME: "tdeck", P.B_HELLO_VER: "1",
@@ -522,6 +603,7 @@ async def _session_task(dest_hash):
         while _state == CONNECTING and time.time() - t0 < WELCOME_WAIT:
             await asyncio.sleep_ms(250)
             if _stale(my_gen):
+                _drop_link(link)
                 return
         if _state == CONNECTING:
             _status("no WELCOME - hub silent")
