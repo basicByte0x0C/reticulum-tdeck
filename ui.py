@@ -1153,6 +1153,16 @@ class UI:
                         bits.append(str(hops) + "hp")
                     bits.append(_age(n.get("seen")))
                     info = " ".join(bits)
+        elif self.node_tab == TAB_RRC:
+            if self._rrc_keys and self._rrc_idx < len(self._rrc_keys):
+                h = self.rrc_hubs.get(self._rrc_keys[self._rrc_idx])
+                if h:
+                    bits = []
+                    hops = h.get("hops")
+                    if hops:
+                        bits.append(str(hops) + "hp")
+                    bits.append(_age(h.get("seen")))
+                    info = " ".join(bits)
         else:  # TAB_SSH
             if self._shell_keys and self.ssh_idx < len(self._shell_keys):
                 s = self.shell_nodes.get(self._shell_keys[self.ssh_idx])
@@ -3751,9 +3761,9 @@ class UI:
         self.dirty = True
 
     def delete_selected(self):
-        """Forget the selected peer (MSG) / node (NET) / listener (SSH) and its
-        local state. The entry re-appears on the next announce; this just clears
-        clutter."""
+        """Forget the selected peer (MSG) / node (NET) / hub (RRC) / listener
+        (SSH) and its local state. The entry re-appears on the next announce;
+        this just clears clutter."""
         if self.node_tab == TAB_MSG:
             if not (0 <= self.selected_idx < len(self._peer_keys)):
                 return
@@ -3780,6 +3790,15 @@ class UI:
                 self.net_idx = max(0, len(self._node_keys) - 1)
             if self.net_scroll > max(0, len(self._node_keys) - (BODY_ROWS - 1)):
                 self.net_scroll = max(0, len(self._node_keys) - (BODY_ROWS - 1))
+        elif self.node_tab == TAB_RRC:
+            if not (0 <= self._rrc_idx < len(self._rrc_keys)):
+                return
+            key = self._rrc_keys.pop(self._rrc_idx)
+            self.rrc_hubs.pop(key, None)
+            if self._rrc_idx >= len(self._rrc_keys):
+                self._rrc_idx = max(0, len(self._rrc_keys) - 1)
+            if self._rrc_scroll > max(0, len(self._rrc_keys) - (BODY_ROWS - 1)):
+                self._rrc_scroll = max(0, len(self._rrc_keys) - (BODY_ROWS - 1))
         else:  # TAB_SSH
             if not (0 <= self.ssh_idx < len(self._shell_keys)):
                 return

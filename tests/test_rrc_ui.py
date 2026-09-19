@@ -233,6 +233,22 @@ def test_trackball_click_on_rrc_tab_opens_the_hub():
     print("ok test_trackball_click_on_rrc_tab_opens_the_hub")
 
 
+def test_delete_on_rrc_tab_forgets_a_hub_not_a_listener():
+    g = make_ui()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    g.add_rrc_hub(b"\x11" * 16, name="Varna Hub", hops=1)
+    g.add_rrc_hub(b"\x22" * 16, name="KC1AWV Hub", hops=2)
+    g.add_shell_node(b"\xee" * 16, name="listener", hops=1)
+    g._rrc_idx = 0
+    g.delete_selected()
+    assert b"\x11" * 16 not in g.rrc_hubs, "selected hub was not forgotten"
+    assert len(g._rrc_keys) == 1
+    assert b"\xee" * 16 in g.shell_nodes, "deleting a hub removed an SSH listener"
+    assert len(g._shell_keys) == 1
+    print("ok test_delete_on_rrc_tab_forgets_a_hub_not_a_listener")
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):
