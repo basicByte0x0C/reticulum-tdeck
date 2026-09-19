@@ -15,12 +15,18 @@ STATE_IMAGE    = 3
 STATE_RECORDING = 4
 STATE_BROWSER  = 5
 STATE_SHELL    = 6
+STATE_RRC_ROOMS = 7
+STATE_RRC_CHAT  = 8
 
 # Node-screen tabs
 TAB_MSG = 0
 TAB_NET = 1
 TAB_SSH = 2
-N_TABS  = 3
+TAB_RRC = 3
+N_TABS  = 4
+
+MAX_RRC_HUBS = 16
+RRC_SCROLLBACK = 120      # lines kept per session, RAM only
 
 # Shell control-key menu (trackball-click overlay — needs no special keyboard
 # keys, which the T-Deck lacks: no Esc/Tab/Ctrl/~). (label, kind, payload).
@@ -635,6 +641,29 @@ class UI:
         self.on_shell_disconnect = None # () -> None — tear down the session
         self.on_shell_seed = None       # () -> None — populate shell_nodes from storage
         self.on_shell_resize = None     # (rows, cols) -> None
+        # RRC (Reticulum Relay Chat) callbacks (wired by tdeck_node.py)
+        self.on_rrc_connect = None      # (dest_hash) -> None
+        self.on_rrc_join = None         # (room, key) -> None
+        self.on_rrc_say = None          # (text) -> None
+        self.on_rrc_part = None         # () -> None
+        self.on_rrc_disconnect = None   # () -> None
+        self.on_rrc_seed = None         # () -> None
+
+        self.rrc_hubs = {}              # dest_hash -> {"name", "hops", "seen"}
+        self._rrc_keys = []             # hub order, newest announce last
+        self._rrc_idx = 0
+        self._rrc_scroll = 0
+        self._rrc_lines = []            # (kind, nick, text), RAM only
+        self._rrc_scroll_chat = 0
+        self._rrc_input = ""
+        self._rrc_room = None
+        self._rrc_hub_name = None
+        self._rrc_members = 0
+        self._rrc_status = ""
+        self._rrc_panel = False         # member panel open (alt+w)
+        self._rrc_panel_idx = 0
+        self._rrc_panel_scroll = 0
+        self._rrc_prompt = False
 
     # --- Screen power management ---
 
@@ -929,16 +958,35 @@ class UI:
 
     # --- Node list screen ---
 
-    def _draw_tab_bar(self):
-        """MSG/NET/SSH tab bar — first body row of the node screen."""
+    def _tab_labels(self):
+        """Tab labels sized to the panel.
+
+        The wide, padded form (" MSG(n) NET(n) RNSH(n) RRC(n) ") is 33
+        columns at the widest single-digit counts and still only 38 at two
+        digits, so the v1's 40 columns always fit it. The Pro's panel is
+        only 30 columns wide, which the wide form never fits, so narrow
+        panels fall back to a compact form that drops the padding, the
+        parentheses and the longer "RNSH" name. COLS is read here rather
+        than captured, since the Pro sets a different screen geometry at
+        import.
+        """
         un = 0
         for v in self.unread.values():
             un += v
-        tabs = (
-            " MSG(" + str(len(self._peer_keys)) + ("*" if un else "") + ") ",
-            " NET(" + str(len(self._node_keys)) + ") ",
-            " RNSH(" + str(len(self._shell_keys)) + ") ",
-        )
+        counts = (str(len(self._peer_keys)) + ("*" if un else ""),
+                  str(len(self._node_keys)),
+                  str(len(self._shell_keys)),
+                  str(len(self._rrc_keys)))
+        wide = (" MSG(" + counts[0] + ") ", " NET(" + counts[1] + ") ",
+                " RNSH(" + counts[2] + ") ", " RRC(" + counts[3] + ") ")
+        if sum(len(x) for x in wide) <= COLS:
+            return wide
+        return (" MSG" + counts[0], " NET" + counts[1],
+                " SSH" + counts[2], " RRC" + counts[3] + " ")
+
+    def _draw_tab_bar(self):
+        """MSG/NET/RNSH/RRC tab bar — first body row of the node screen."""
+        tabs = self._tab_labels()
         cache_key = str(self.node_tab) + "".join(tabs)
         if self._cache[1] == cache_key:
             return
@@ -1694,6 +1742,9 @@ class UI:
             return self._handle_key_browser(ch, key)
         elif self.state == STATE_SHELL:
             return self._handle_key_shell(ch, key)
+        elif self.state in (STATE_RRC_ROOMS, STATE_RRC_CHAT):
+            import rrc_ui
+            return rrc_ui.handle_key(self, ch, key)
         else:
             return self._handle_key_chat(ch, key)
 
@@ -1977,6 +2028,60 @@ class UI:
             self._shell_status = "disconnected — Esc to leave"
         if self.state == STATE_SHELL:
             self.dirty = True
+
+    # --- RRC (Reticulum Relay Chat) GUI API, called by rrc_client ---------
+
+    def add_rrc_hub(self, dest_hash, name=None, hops=None):
+        entry = self.rrc_hubs.get(dest_hash)
+        if entry is None:
+            entry = {"name": name, "hops": hops, "seen": time.time()}
+            self.rrc_hubs[dest_hash] = entry
+            self._rrc_keys.append(dest_hash)
+            while len(self._rrc_keys) > MAX_RRC_HUBS:
+                self.rrc_hubs.pop(self._rrc_keys.pop(0), None)
+        else:
+            if name:
+                entry["name"] = name
+            if hops is not None:
+                entry["hops"] = hops
+            entry["seen"] = time.time()
+        self.dirty = True
+
+    def clear_rrc_hubs(self):
+        self.rrc_hubs = {}
+        self._rrc_keys = []
+        self._rrc_idx = 0
+        self._rrc_scroll = 0
+        self.dirty = True
+
+    def rrc_status(self, text):
+        self._rrc_status = text
+        self.dirty = True
+
+    def rrc_line(self, kind, nick, text):
+        self._rrc_lines.append((kind, nick, text))
+        while len(self._rrc_lines) > RRC_SCROLLBACK:
+            self._rrc_lines.pop(0)
+        self._rrc_scroll_chat = 0
+        self.dirty = True
+
+    def rrc_roster(self, count):
+        self._rrc_members = count
+        self.dirty = True
+
+    def rrc_joined(self, room):
+        self._rrc_room = room
+        self.state = STATE_RRC_CHAT
+        self.dirty = True
+
+    def rrc_welcome(self, hub_name):
+        self._rrc_hub_name = hub_name
+        self.state = STATE_RRC_ROOMS
+        self.dirty = True
+
+    def rrc_closed(self):
+        self._rrc_room = None
+        self.dirty = True
 
     # --- Browser page view ---
 
@@ -3848,6 +3953,12 @@ class UI:
             self.draw_browser()
         elif self.state == STATE_SHELL:
             self.draw_shell()
+        elif self.state == STATE_RRC_ROOMS:
+            import rrc_ui
+            rrc_ui.draw_rooms(self)
+        elif self.state == STATE_RRC_CHAT:
+            import rrc_ui
+            rrc_ui.draw_room(self)
         elif self.state == STATE_RECORDING:
             self._draw_recording()
         # Shared neon body frame — drawn last so corners stay crisp on every
