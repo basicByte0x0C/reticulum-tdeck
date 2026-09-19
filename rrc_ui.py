@@ -8,10 +8,12 @@
 # The client interprets structured fields; everything the hub says in
 # prose is painted as prose. That is why there is no parser here.
 
-from ui import (BODY_Y, CHAR_H, CHAR_W, COLS, INPUT_Y, SCREEN_W,
+from ui import (BODY_Y, CACHE_ROWS, CHAR_H, CHAR_W, COLS, INPUT_Y, SCREEN_W,
                 BODY_ROWS, STATE_NODES, STATE_RRC_CHAT, STATE_RRC_ROOMS,
                 TAB_RRC, _pad, _ascii)
 # SCREEN_H and SEP_Y are unused here.
+
+import rrc_proto as _P      # constants only -- for the composer's fallback cap
 
 
 def open_selected_hub(ui):
@@ -68,18 +70,26 @@ def _wrap(text, width):
     return out
 
 
+def _wrap_line(kind, nick, text):
+    """Wrap one scrollback entry into its display rows.
+
+    Shared by _flatten() and ui.rrc_line()'s scroll anchor, so the nick
+    prefixes that decide a line's height live in exactly one place."""
+    body = text
+    if kind == "msg" and nick:
+        body = nick + "> " + text
+    elif kind == "action" and nick:
+        body = "* " + nick + " " + text
+    return _wrap(_ascii(body), COLS)
+
+
 def _flatten(ui):
     """Wrap every scrollback line to COLS, newest last. Shared by
     _visible_lines (which windows it) and the trackball scroll clamp
     (which only needs the total count)."""
     flat = []
     for kind, nick, text in ui._rrc_lines:
-        body = text
-        if kind == "msg" and nick:
-            body = nick + "> " + text
-        elif kind == "action" and nick:
-            body = "* " + nick + " " + text
-        for piece in _wrap(_ascii(body), COLS):
+        for piece in _wrap_line(kind, nick, text):
             flat.append((kind, piece))
     return flat
 
@@ -116,22 +126,54 @@ def _draw_footer(ui):
     ui.tft.text(ui.font, _pad(hint), 0, INPUT_Y, ui.DIM_CYAN, ui.BG_DARK)
 
 
+# alt+w, as the keyboard actually delivers it.
+#
+# The evidence in this repo, not a guess: board_tdeck_v1.get_key() is
+# `i2c.readfrom(KBD_ADDR, 1)` -- exactly ONE byte per keystroke -- and
+# board_tdeck_pro.get_key() keeps that contract, while ui.kbd_loop() calls
+# handle_key(key) once per byte. So a two-byte b"\x1bw" comparison can never
+# be true on either board. The v1's ESP32-C3 keyboard puts its alt/sym layer
+# on the control codes: README.md documents Sym/Alt+c/d/z as Ctrl-C/D/Z, and
+# ui._handle_key_shell() forwards "control bytes straight from the keyboard
+# (Ctrl-C=0x03, Ctrl-D=0x04, Ctrl-Z=0x1a, ...)" one byte at a time. alt+w is
+# therefore Ctrl-W, 0x17.
+#
+# The esc-prefixed form is kept as a harmless alternative in case a keyboard
+# firmware reports the layer that way; the device boot-test says which path
+# actually fires. (README also notes the exact Sym/Alt codes depend on the
+# keyboard firmware revision.)
+_ALT_W = 0x17
+
+
+def _invalidate_rows(ui):
+    """Drop the body row cache so the next draw repaints every row.
+
+    The member panel is an overlay: it fill_rect()s over rows the cache
+    believes are already correct, so closing it leaves the panel painted on
+    screen -- the next draw_room() emits one text call and no fills. ui.py
+    already solves exactly this for the shell control menu
+    (_shell_menu_open/_shell_menu_close); this follows that precedent, on
+    open and on all three close paths.
+    """
+    ui._cache = [''] * CACHE_ROWS
+
+
 def handle_key(ui, ch, key):
     if ui.state == STATE_RRC_CHAT:
         # alt+w toggles the member panel. A bare (w) cannot: every letter
-        # key belongs to the composer, and enter sends it. How alt arrives
-        # from the tca8418 driver (esc-prefixed, here) is unverified --
-        # Task 10's hardware boot-test is the check; if the driver reports
-        # it differently this is a one-line fix.
-        if key == b"\x1bw" or key == b"\x1bW":
+        # key belongs to the composer, and enter sends it. See _ALT_W above
+        # for how the keyboard encodes it.
+        if ch == _ALT_W or key == b"\x1bw" or key == b"\x1bW":
             ui._rrc_panel = not ui._rrc_panel
             ui._rrc_panel_idx = 0
             ui._rrc_panel_scroll = 0
+            _invalidate_rows(ui)
             ui.dirty = True
             return True
         if ui._rrc_panel:
             if ch == 27:
                 ui._rrc_panel = False
+                _invalidate_rows(ui)
                 ui.dirty = True
                 return True
             return True          # panel holds focus; keys do not compose
@@ -154,6 +196,12 @@ def handle_key(ui, ch, key):
         if ch == 13:                     # enter sends the composer line
             text = ui._rrc_input.strip()
             ui._rrc_input = ""
+            # Sending returns the view to the live tail. rrc_line() holds a
+            # reader's anchor against arriving traffic, so without this a
+            # message sent while scrolled back -- and its local echo --
+            # would land off screen. Same rule as the LXMF view: your own
+            # message snaps, everybody else's does not.
+            ui._rrc_scroll_chat = 0
             ui.dirty = True
             if text and ui.on_rrc_say:
                 ui.on_rrc_say(text)
@@ -169,11 +217,43 @@ def handle_key(ui, ch, key):
             ui._rrc_panel = False
             ui.dirty = True
             return True
-        if 32 <= ch < 127 and len(ui._rrc_input) < COLS - 2:
+        # The composer is capped on the session's real byte budget, never on
+        # a column count: the protocol allows ~350 bytes against a 38-column
+        # row, and the old COLS - 2 cap made rrc_client.compose_cap() dead
+        # code. The line tail-scrolls instead (see _draw_composer), so typing
+        # past the visible width stays visible rather than being refused.
+        if 32 <= ch < 127 and _blen(ui._rrc_input) < _cap(ui):
             ui._rrc_input += chr(ch)
             ui.dirty = True
             return True
     return False
+
+
+def _blen(text):
+    """UTF-8 byte length. The cap is a byte budget -- a mention token
+    inserted from the member panel carries a hub-controlled nick, which is
+    not necessarily ASCII."""
+    return len(text.encode("utf-8"))
+
+
+def _cap(ui):
+    """The composer's byte budget for this session.
+
+    Computed per session by rrc_client.compose_cap() (the hub's WELCOME
+    limit against the live link MDU) and reached through a GUI callback,
+    the way every other on_rrc_* slot works. With no session up -- or a
+    client that answers with nonsense -- fall back to the protocol default
+    so the composer is never refused before a WELCOME lands.
+    """
+    fn = getattr(ui, "on_rrc_cap", None)
+    if fn is not None:
+        try:
+            cap = fn()
+        except Exception:
+            cap = None
+        if isinstance(cap, int) and cap > 0:
+            return cap
+    return _P.DEFAULT_MAX_BODY
 
 
 def _handle_prompt_key(ui, ch, key):
@@ -304,8 +384,13 @@ def panel_click(ui):
         return False
     src = roster[ui._rrc_panel_idx][0]
     token = ui.on_rrc_mention(src) if ui.on_rrc_mention else "@" + src.hex()[:8]
+    # Inserted whole, even if it takes the line past the session's byte
+    # budget: the composer's remaining count then goes negative, which says
+    # so plainly, and say() trims to the cap before sending. Refusing the
+    # insert silently would be worse than either.
     ui._rrc_input += token + " "
     ui._rrc_panel = False
+    _invalidate_rows(ui)
     ui.dirty = True
     return True
 
@@ -359,6 +444,31 @@ def draw_room(ui):
     if ui._rrc_panel:
         draw_member_panel(ui)          # Task 9
 
-    prompt = "> " + ui._rrc_input
-    ui.tft.text(ui.font, _pad(prompt)[:COLS], 0, INPUT_Y,
-                ui.DIM_CYAN if ui._rrc_panel else ui.NEON_CYAN, ui.BG_DARK)
+    _draw_composer(ui)
+
+
+def _draw_composer(ui):
+    """'> text' plus the bytes still left of the session's cap.
+
+    The cap is ~350 bytes against a 38-column row, so the line tail-scrolls
+    with a '<' continuation marker -- the same idiom ui._draw_input_line()
+    uses for the LXMF composer, where the caret is always the last cell.
+    The count in the right-hand columns is BYTES remaining, not characters:
+    a mention inserted from the member panel carries a hub-controlled nick
+    that need not be ASCII.
+
+    The row goes through ui._tb() for that same reason -- a kept Cyrillic
+    character reaching tft.text() as a raw str is the Task 8 header bug, and
+    click-to-mention is how one gets into the composer. _tb() rather than
+    _ascii() because it maps one glyph per character and so preserves the
+    spacing the user actually typed, which _ascii() collapses.
+    """
+    left = _cap(ui) - _blen(ui._rrc_input)
+    tail = " %d" % left
+    avail = max(2, COLS - 2 - len(tail))   # columns for the text, after "> "
+    inp = ui._rrc_input
+    if len(inp) > avail:
+        inp = "<" + inp[-(avail - 1):]
+    row = _pad("> " + inp, COLS - len(tail)) + tail
+    fg = ui.DIM_CYAN if ui._rrc_panel else ui.NEON_CYAN
+    ui.tft.text(ui.font, ui._tb(row[:COLS]), 0, INPUT_Y, fg, ui.BG_DARK)

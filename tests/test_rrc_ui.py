@@ -698,11 +698,18 @@ def test_panel_open_leaves_room_scrollback_untouched_even_when_scrolled():
     print("ok test_panel_open_leaves_room_scrollback_untouched_even_when_scrolled")
 
 
-def test_new_message_resets_scroll_after_reading_back():
-    # Documents the interaction between the new trackball wiring and
-    # rrc_line()'s existing snap-to-bottom-on-arrival behaviour: reading
-    # back and then a message landing must not leave the scroll offset
-    # stranded pointing at nothing once the buffer moves under it.
+def test_a_new_message_does_not_yank_a_reader_to_the_bottom():
+    # REPLACES test_new_message_resets_scroll_after_reading_back, which
+    # pinned the defect: rrc_line() snapped _rrc_scroll_chat to 0 on EVERY
+    # inbound line, so reading scrollback in a busy room -- or during a
+    # long /list reply or the MOTD burst -- was constantly yanked to the
+    # bottom. A nonzero offset means the user deliberately scrolled back.
+    #
+    # The anchor is held exactly, not merely "not reset": the window is
+    # measured back from the end, so the offset must grow by the new
+    # line's WRAPPED height. Asserting the same rows are still on screen
+    # is what catches an off-by-height -- a bare "scroll != 0" check would
+    # pass even if the view crept a row per message.
     g = make_ui()
     g.state = U.STATE_RRC_CHAT
     g._rrc_room = "#varna"
@@ -711,14 +718,106 @@ def test_new_message_resets_scroll_after_reading_back():
     g._irq_up = 5
     g.handle_trackball()
     assert g._rrc_scroll_chat == 5, g._rrc_scroll_chat
+    import rrc_ui
+    # The row cache suppresses an unchanged row, so both frames are drawn
+    # from a cleared cache -- otherwise "nothing repainted" would compare
+    # equal to "the same rows repainted" and the assertion would be empty.
+    g._cache = [''] * U.CACHE_ROWS
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    before = _painted(g.tft.calls)
 
-    g.rrc_line("msg", "sam", "line 20")   # a new message arrives mid-read
+    # One short line (wraps to 1 row) and one long one (wraps to 3), so a
+    # naive "+= 1" is caught as well as a "leave it alone".
+    g.rrc_line("msg", "sam", "line 20")
+    assert g._rrc_scroll_chat == 6, g._rrc_scroll_chat
+    long_text = "x" * (U.COLS * 2 + 5)
+    g.rrc_line("notice", None, long_text)
+    height = len(rrc_ui._wrap_line("notice", None, long_text))
+    assert height > 1, height
+    assert g._rrc_scroll_chat == 6 + height, g._rrc_scroll_chat
+
+    g._cache = [''] * U.CACHE_ROWS
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    after = _painted(g.tft.calls)
+    assert after == before, (before, after)   # the same rows, unmoved
+    assert "line 20" not in after, after
+    print("ok test_a_new_message_does_not_yank_a_reader_to_the_bottom")
+
+
+def test_sending_your_own_message_returns_the_view_to_the_live_tail():
+    # The other half of the LXMF rule the anchor fix borrows: everybody
+    # else's message holds your place, your own brings you back. Without
+    # this, a message typed while scrolled back -- and say()'s local echo
+    # of it -- would land off screen.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    said = []
+    g.on_rrc_say = lambda text: said.append(text)
+    for i in range(20):
+        g.rrc_line("msg", "sam", "line %02d" % i)
+    g._irq_up = 5
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 5
+    for c in "gm":
+        g.handle_key(c.encode())
+    g.handle_key(b"\r")
+    assert said == ["gm"], said
+    assert g._rrc_scroll_chat == 0, g._rrc_scroll_chat
+    print("ok test_sending_your_own_message_returns_the_view_to_the_live_tail")
+
+
+def test_a_new_message_still_shows_immediately_when_not_scrolled_back():
+    # The other half of the same fix: at the bottom (the normal case) an
+    # arriving line must still appear without the user doing anything.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(20):
+        g.rrc_line("msg", "sam", "line %02d" % i)
+    assert g._rrc_scroll_chat == 0
+    g.rrc_line("msg", "sam", "line 20")
     assert g._rrc_scroll_chat == 0, g._rrc_scroll_chat
     g.tft.calls = []
     import rrc_ui
     rrc_ui.draw_room(g)
     assert "line 20" in _painted(g.tft.calls)
-    print("ok test_new_message_resets_scroll_after_reading_back")
+    print("ok test_a_new_message_still_shows_immediately_when_not_scrolled_back")
+
+
+def test_scrolled_back_reader_survives_the_scrollback_ring_evicting():
+    # The ring drops the oldest line once past RRC_SCROLLBACK. Eviction
+    # shifts the window and the content by the same amount, so the anchor
+    # adjustment is the new line's height either way -- but only if the
+    # code does not try to "correct" for the eviction. Drive the buffer
+    # past the cap while scrolled back and prove the offset still tracks.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(U.RRC_SCROLLBACK):
+        g.rrc_line("msg", "sam", "line %03d" % i)
+    g._irq_up = 4
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 4, g._rrc_scroll_chat
+    import rrc_ui
+    # The row cache suppresses an unchanged row, so both frames are drawn
+    # from a cleared cache -- otherwise "nothing repainted" would compare
+    # equal to "the same rows repainted" and the assertion would be empty.
+    g._cache = [''] * U.CACHE_ROWS
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    before = _painted(g.tft.calls)
+
+    g.rrc_line("msg", "sam", "overflow")     # forces an eviction
+    assert len(g._rrc_lines) == U.RRC_SCROLLBACK
+    assert g._rrc_scroll_chat == 5, g._rrc_scroll_chat
+    g._cache = [''] * U.CACHE_ROWS
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    assert _painted(g.tft.calls) == before
+    print("ok test_scrolled_back_reader_survives_the_scrollback_ring_evicting")
 
 
 def test_trackball_scroll_in_the_hub_console_does_not_touch_lxmf_chat_state():
@@ -758,6 +857,271 @@ def test_trackball_up_clamps_at_the_top_of_the_hub_console():
     painted = _painted(g.tft.calls)
     assert "#room0 - topic" in painted, painted   # the oldest notice is now on screen
     print("ok test_trackball_up_clamps_at_the_top_of_the_hub_console")
+
+
+# --- Critical 1: keys must reach RRC through UI.handle_key ------------------
+#
+# Every RRC key test above calls rrc_ui.handle_key() directly, which skips
+# UI.handle_key()'s _bare_nav_key() lookup -- and that lookup ran BEFORE state
+# dispatch, turning a bare e/x into a scroll event on every RRC screen. The
+# tests below drive the real entry point instead. That convention is exactly
+# what hid the bug: test_alt_w_opens_the_panel_and_takes_focus even feeds a
+# literal "x" that the real path would have eaten.
+
+
+def test_typing_e_and_x_reaches_the_room_composer_through_handle_key():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    said = []
+    g.on_rrc_say = lambda text: said.append(text)
+    for c in "hex test":
+        g.handle_key(c.encode())
+    assert g._rrc_input == "hex test", g._rrc_input   # was "h tst"
+    # ...and the swallowed keys must not have queued scroll events either.
+    assert (g._irq_up, g._irq_down) == (0, 0), (g._irq_up, g._irq_down)
+    g.handle_key(b"\r")
+    assert said == ["hex test"], said
+    print("ok test_typing_e_and_x_reaches_the_room_composer_through_handle_key")
+
+
+def test_typing_e_and_x_reaches_the_join_prompt_through_handle_key():
+    # #mesh cannot be joined at all without this: drop the e and the name the
+    # hub gets is a different room.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    joined = []
+    g.on_rrc_join = lambda room, key=None: joined.append((room, key))
+    g.handle_key(b"j")                 # (j) opens the room-name prompt
+    assert g._rrc_prompt is True
+    for c in "#mesh-extra":
+        g.handle_key(c.encode())
+    assert g._rrc_input == "#mesh-extra", g._rrc_input   # was "#msh-tra"
+    g.handle_key(b"\r")
+    assert joined == [("#mesh-extra", None)], joined
+    print("ok test_typing_e_and_x_reaches_the_join_prompt_through_handle_key")
+
+
+def test_e_and_x_still_scroll_the_hub_console_when_no_prompt_is_open():
+    # The other half of the _accepting_text() change: the console has no text
+    # field until (j) opens one, so e/x must keep their bare-nav meaning there
+    # rather than being made inert across the whole tab.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    for i in range(40):
+        g.rrc_line("notice", None, "  #room%d - topic" % i)
+    g.handle_key(b"e")
+    assert g._rrc_input == "", g._rrc_input
+    g.handle_trackball()
+    assert g._rrc_scroll_chat > 0, "e stopped scrolling the console"
+    print("ok test_e_and_x_still_scroll_the_hub_console_when_no_prompt_is_open")
+
+
+# --- Critical 2: alt+w as the keyboard actually delivers it -----------------
+
+
+def test_alt_w_control_code_opens_the_panel_through_handle_key():
+    # board_tdeck_v1.get_key() is a ONE-byte i2c read and ui.kbd_loop() calls
+    # handle_key() once per byte, so the old two-byte b"\x1bw" comparison
+    # could never be true on hardware -- and it was the only setter of
+    # _rrc_panel, so the panel, click-to-mention and mention_for() were all
+    # unreachable. The v1 keyboard puts its alt layer on the control codes
+    # (README: Sym/Alt+c = Ctrl-C), so alt+w is Ctrl-W = 0x17.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])
+    g.handle_key(b"\x17")
+    assert g._rrc_panel is True
+    assert g._rrc_input == "", "alt+w must not compose a character"
+    g.handle_key(b"\x17")                    # and it toggles back
+    assert g._rrc_panel is False
+    print("ok test_alt_w_control_code_opens_the_panel_through_handle_key")
+
+
+def test_alt_w_esc_prefixed_form_still_opens_the_panel():
+    # Kept as a harmless alternative in case a keyboard firmware reports the
+    # alt layer esc-prefixed; whichever the hardware emits, the panel opens.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])
+    g.handle_key(b"\x1bw")
+    assert g._rrc_panel is True
+    print("ok test_alt_w_esc_prefixed_form_still_opens_the_panel")
+
+
+# --- Important 4: the panel must not stay painted after it closes ----------
+
+
+def test_every_panel_close_path_invalidates_the_row_cache():
+    # The panel is an overlay: fill_rect over rows the row cache believes are
+    # already correct. None of the three close paths invalidated it, so the
+    # next draw_room() emitted one text call and no fills -- the panel stayed
+    # on screen. ui._shell_menu_open/_close solve exactly this for the shell
+    # control menu; this follows that precedent.
+    #
+    # The assertion is that the covered rows are REPAINTED after the close,
+    # not merely that _cache is empty: an implementation that cleared some
+    # other cache would pass the weaker check.
+    import rrc_ui
+
+    def _room_with_panel_open():
+        g = make_ui()
+        g.state = U.STATE_RRC_CHAT
+        g._rrc_room = "#varna"
+        for i in range(6):
+            g.rrc_line("msg", "sam", "line %d" % i)
+        g.rrc_members([(b"\x11" * 16, "sv2rck")])
+        g.on_rrc_mention = lambda h: "@sv2rck"
+        rrc_ui.draw_room(g)                  # fills the row cache
+        g.handle_key(b"\x17")                # alt+w
+        assert g._rrc_panel is True
+        rrc_ui.draw_room(g)                  # paints the panel over those rows
+        return g
+
+    closers = (
+        ("alt+w toggle", lambda g: g.handle_key(b"\x17")),
+        ("esc", lambda g: g.handle_key(b"\x1b")),
+        ("panel click", lambda g: rrc_ui.panel_click(g)),
+    )
+    for name, close in closers:
+        g = _room_with_panel_open()
+        close(g)
+        assert g._rrc_panel is False, name
+        g.tft.calls = []
+        rrc_ui.draw_room(g)
+        painted = _painted(g.tft.calls)
+        assert "sam> line 5" in painted, (name, painted)
+    print("ok test_every_panel_close_path_invalidates_the_row_cache")
+
+
+# --- Important 5: the composer's cap is the session's byte budget ----------
+
+
+def test_composer_caps_on_the_session_budget_not_the_column_count():
+    # The old cap was COLS - 2 = 38 characters against a ~350-byte protocol
+    # allowance, which made rrc_client.compose_cap() dead code.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.on_rrc_cap = lambda: 350
+    import rrc_ui
+    for _ in range(400):
+        rrc_ui.handle_key(g, ord("a"), b"a")
+    assert len(g._rrc_input) == 350, len(g._rrc_input)
+    assert len(g._rrc_input) > U.COLS - 2
+    print("ok test_composer_caps_on_the_session_budget_not_the_column_count")
+
+
+def test_composer_cap_follows_a_smaller_session_budget():
+    # A path that negotiates a lower MTU inverts the usual headroom, so the
+    # cap has to be able to come back SMALLER than the hub's 350 too.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.on_rrc_cap = lambda: 12
+    import rrc_ui
+    for _ in range(30):
+        rrc_ui.handle_key(g, ord("b"), b"b")
+    assert g._rrc_input == "b" * 12, g._rrc_input
+    print("ok test_composer_cap_follows_a_smaller_session_budget")
+
+
+def test_composer_budget_counts_utf8_bytes_not_characters():
+    # This branch has already had two byte-vs-character bugs. A mention
+    # inserted from the member panel carries a hub-controlled nick, so a
+    # multi-byte composer buffer is reachable, not hypothetical.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.on_rrc_cap = lambda: 20
+    g._rrc_input = "Я" * 9                 # 9 characters, 18 UTF-8 bytes
+    import rrc_ui
+    for _ in range(5):
+        rrc_ui.handle_key(g, ord("a"), b"a")
+    assert g._rrc_input == "Я" * 9 + "aa", g._rrc_input
+    print("ok test_composer_budget_counts_utf8_bytes_not_characters")
+
+
+def test_composer_falls_back_to_the_protocol_default_with_no_session():
+    # No session up (on_rrc_cap unwired, or a client that answers nonsense):
+    # typing must not be refused before a WELCOME lands.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    import rrc_proto as P
+    import rrc_ui
+    assert g.on_rrc_cap is None
+    assert rrc_ui._cap(g) == P.DEFAULT_MAX_BODY
+    g.on_rrc_cap = lambda: None                 # a client with no link yet
+    assert rrc_ui._cap(g) == P.DEFAULT_MAX_BODY
+
+    def _boom():
+        raise RuntimeError("no session")
+
+    g.on_rrc_cap = _boom                        # and one that raises
+    assert rrc_ui._cap(g) == P.DEFAULT_MAX_BODY
+    print("ok test_composer_falls_back_to_the_protocol_default_with_no_session")
+
+
+def test_composer_shows_the_remaining_byte_count():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.on_rrc_cap = lambda: 350
+    import rrc_ui
+    for c in "gm":
+        rrc_ui.handle_key(g, ord(c), c.encode())
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "> gm" in painted, painted
+    assert "348" in painted, painted          # bytes left, not characters
+    print("ok test_composer_shows_the_remaining_byte_count")
+
+
+def test_composer_tail_scrolls_a_long_line_instead_of_refusing_it():
+    # ui._draw_input_line()'s idiom: the caret is always the last cell, so a
+    # line longer than the row shows its tail behind a "<" marker. Without
+    # this, capping at 350 bytes on a 40-column row would type into space the
+    # user cannot see.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.on_rrc_cap = lambda: 350
+    import rrc_ui
+    for c in "HEAD" + "." * 60 + "TAIL":
+        rrc_ui.handle_key(g, ord(c), c.encode())
+    assert len(g._rrc_input) == 68, len(g._rrc_input)
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "TAIL" in painted, painted
+    assert "HEAD" not in painted, painted
+    assert "<" in painted, painted
+    assert "282" in painted, painted          # 350 - 68, still counted
+    print("ok test_composer_tail_scrolls_a_long_line_instead_of_refusing_it")
+
+
+def test_composer_carries_a_cyrillic_mention_through_tb():
+    # Critical 2 makes click-to-mention reachable for the first time, and a
+    # nick is hub-controlled: a kept Cyrillic character reaching tft.text()
+    # as a raw str is the Task 8 header bug, in the composer row this time.
+    # FakeTFT.text() does s.encode("ascii") on a str, so this raises without
+    # the ui._tb() wrap.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "Варна")])
+    g.on_rrc_mention = lambda h: "@Варна"
+    import rrc_ui
+    rrc_ui.panel_click(g)
+    assert g._rrc_input == "@Варна ", g._rrc_input
+    g.tft.calls = []
+    rrc_ui.draw_room(g)                       # must not raise
+    print("ok test_composer_carries_a_cyrillic_mention_through_tb")
 
 
 if __name__ == "__main__":

@@ -649,6 +649,7 @@ class UI:
         self.on_rrc_disconnect = None   # () -> None
         self.on_rrc_seed = None         # () -> None
         self.on_rrc_mention = None      # (identity_hash) -> "@token" string
+        self.on_rrc_cap = None          # () -> composer byte budget (int)
 
         self.rrc_hubs = {}              # dest_hash -> {"name", "hops", "seen"}
         self._rrc_keys = []             # hub order, newest announce last
@@ -1712,6 +1713,17 @@ class UI:
             return True
         if self.state == STATE_RECORDING:
             return True
+        if self.state == STATE_RRC_CHAT:
+            # The room composer takes every letter, so e and x have to stay
+            # letters here: without this a bare 'e' was eaten as a scroll
+            # event before rrc_ui.handle_key() ever saw it, and "hex test"
+            # arrived as "h tst".
+            return True
+        if self.state == STATE_RRC_ROOMS:
+            # The hub console has no text field -- until (j) opens the
+            # room-name prompt, which does. Room names carry e and x
+            # (#mesh, #mesh-extra), so the prompt could not be typed at all.
+            return self._rrc_prompt
         if self.state == STATE_SETTINGS:
             return self._settings_page in self._TEXT_ENTRY_PAGES
         return False
@@ -2088,7 +2100,18 @@ class UI:
         self._rrc_lines.append((kind, nick, text))
         while len(self._rrc_lines) > RRC_SCROLLBACK:
             self._rrc_lines.pop(0)
-        self._rrc_scroll_chat = 0
+        if self._rrc_scroll_chat > 0:
+            # The user is deliberately reading back. Snapping to the newest
+            # line here yanked them to the bottom on every arrival, which a
+            # busy room, a long /list reply or the MOTD burst makes constant
+            # -- the LXMF view only snaps for your own messages. Hold the
+            # anchor exactly instead: the window is measured back from the
+            # end (_visible_lines), so keeping the same rows on screen means
+            # adding the new line's *wrapped* height, not 1. That is exact
+            # whether or not the ring just evicted an older line, because
+            # eviction shifts the window and the content by the same amount.
+            import rrc_ui
+            self._rrc_scroll_chat += len(rrc_ui._wrap_line(kind, nick, text))
         self.dirty = True
 
     def rrc_roster(self, count):
@@ -3618,8 +3641,9 @@ class UI:
                 self._shell_scroll(-1)    # scroll terminal toward newer output
         elif self.state in (STATE_RRC_CHAT, STATE_RRC_ROOMS):
             # One tick = one wrapped line toward the newest message; 0 is
-            # the floor -- rrc_line() already snaps here on arrival, so
-            # this only ever needs to climb back down to it.
+            # the floor, and the only way back to it. rrc_line() no longer
+            # snaps here on arrival -- it holds the reader's anchor instead
+            # -- so this is what returns the view to the live tail.
             if self._rrc_scroll_chat > 0:
                 self._rrc_scroll_chat -= 1
         elif self.state == STATE_CHAT:
