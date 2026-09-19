@@ -205,6 +205,46 @@ def test_non_ascii_hub_text_is_transliterated_before_drawing():
     print("ok test_non_ascii_hub_text_is_transliterated_before_drawing")
 
 
+def test_cyrillic_hub_name_survives_the_console_header():
+    # _ascii() KEEPS Cyrillic (ui._CYR), unlike the accented latin chars the
+    # sibling test above uses -- so this is the path that must reach _tb().
+    # Without the _tb() wrap in _draw_header, the raw str hits tft.text()
+    # and FakeTFT's s.encode("ascii") raises; the real driver would
+    # silently UTF-8-mangle it instead.
+    #
+    # The assertion checks for a *bytes* text call specifically, not just
+    # "any text call happened": draw_rooms()'s footer always paints
+    # something, so a bare any(c[0] == "text" ...) would stay true even if
+    # the header swallowed an encode failure and painted nothing. A bytes
+    # call can only come out of _tb(), and with an empty scrollback here
+    # the header's hub-name draw is the only call that can produce one.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g._rrc_hub_name = "Варна Хаб"
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_rooms(g)                       # must not raise
+    assert any(c[0] == "text" and isinstance(c[1], (bytes, bytearray))
+               for c in g.tft.calls), g.tft.calls
+    print("ok test_cyrillic_hub_name_survives_the_console_header")
+
+
+def test_cyrillic_room_name_survives_the_room_header():
+    # Same shape and same reasoning as the console-header test above, for
+    # draw_room()'s own header (the room name is hub-echoed via the JOIN
+    # reply's K_ROOM field, so it needs the same treatment as a hub name).
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#варна"
+    g._rrc_members = 3
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)                        # must not raise
+    assert any(c[0] == "text" and isinstance(c[1], (bytes, bytearray))
+               for c in g.tft.calls), g.tft.calls
+    print("ok test_cyrillic_room_name_survives_the_room_header")
+
+
 def test_trackball_scroll_on_rrc_tab_does_not_touch_ssh_state():
     g = make_ui()
     g.state = U.STATE_NODES
