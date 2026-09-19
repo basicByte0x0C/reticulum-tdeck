@@ -113,7 +113,7 @@ SEEN_IDS = 60           # K_IDs remembered for replay dedupe
 RATE_BACKOFF_S = 15     # pause sends after a hub "rate limited"
 
 _link = None
-_dest = None
+_dest = None            # current hub identity hash being connected to
 _state = IDLE
 _room = None
 _roster = {}            # identity_hash -> nick or None
@@ -280,9 +280,98 @@ def _on_packet(data, packet=None):
     # Unknown type: a future core message or an extension. Ignore it.
 
 
+# --- outbound ---------------------------------------------------------------
+
+CONNECT_PATH_WAIT = 30   # seconds to wait for a path
+LINK_ATTEMPTS = 4        # lossy multi-hop LoRa drops requests and proofs
+WELCOME_WAIT = 60        # upper bound on the WELCOME wait
+
+_task_gen = 0
+
+
+def compose_cap():
+    """Longest body this session can send, from the hub's limit and the link."""
+    mdu = getattr(_link, "mdu", 431) if _link is not None else 431
+    return P.body_cap(mdu, _limits.get(P.L_MAX_BODY))
+
+
+def mention_for(identity_hash):
+    """The @-token that names this member.
+
+    The hub matches @nick or @<6+ hex of an identity hash>; a bare nick
+    matches nothing, and an ambiguous @nick resolves to nobody at all.
+    We hold the roster, so ambiguity is decidable here."""
+    src = bytes(identity_hash)
+    nick = _roster.get(src)
+    if nick:
+        same = 0
+        for other in _roster:
+            if _roster[other] == nick:
+                same += 1
+        if same == 1:
+            return "@" + nick
+    return "@" + src.hex()[:8]
+
+
+def say(text):
+    """Send composer text to the joined room.
+
+    "/me ..." becomes ACTION; every other slash string goes as MSG, which
+    is what makes the hub's whole command set free."""
+    if _state != JOINED or not text:
+        return False
+    if time.time() < _backoff_until:
+        _status("rate limited - hold on")
+        return False
+    t = P.T_MSG
+    body = text
+    if text.startswith("/me ") and len(text) > 4:
+        t = P.T_ACTION
+        body = text[4:]
+    cap = compose_cap()
+    if len(body.encode("utf-8")) > cap:
+        # cap is a byte budget; trim whole characters until the encoded
+        # body fits, so a multi-byte tail cannot overrun it.
+        while body and len(body.encode("utf-8")) > cap:
+            body = body[:-1]
+        if not body:
+            return False
+    return _send_env(P.make_envelope(t, src=_my_identity.hash, room=_room,
+                                     body=body, nick=_nick()))
+
+
+def join(room, key=None):
+    """JOIN a room. A +k room takes its key as the JOIN body."""
+    global _room
+    if _state not in (READY, JOINED) or not room:
+        return False
+    name = room.strip().lower()     # rrcd normalises exactly this way
+    if not name:
+        return False
+    _room = name
+    _roster.clear()
+    return _send_env(P.make_envelope(P.T_JOIN, src=_my_identity.hash,
+                                     room=name, body=key, nick=_nick()))
+
+
+def part():
+    """PART the joined room, staying connected to the hub."""
+    global _room, _state
+    if _state != JOINED or not _room:
+        return False
+    ok = _send_env(P.make_envelope(P.T_PART, src=_my_identity.hash, room=_room))
+    _room = None
+    _roster.clear()
+    _state = READY
+    _roster_changed()
+    return ok
+
+
 def disconnect():
-    """Tear the session down. Task 5 sends PART first when in a room."""
-    global _link, _state, _room
+    """Tear the session down: PART the room, then close the link."""
+    global _link, _state, _room, _limits, _hub_name
+    if _state == JOINED:
+        part()
     if _link is not None:
         try:
             _link.teardown()
@@ -290,4 +379,138 @@ def disconnect():
             pass
     _link = None
     _room = None
+    _limits = {}
+    _hub_name = None
+    _roster.clear()
+    _seen_ids[:] = []
     _state = CLOSED
+
+
+def _task_gen_next():
+    global _task_gen
+    _task_gen += 1
+    return _task_gen
+
+
+def _stale(my_gen):
+    return my_gen != _task_gen
+
+
+def connect(dest_hash):
+    """GUI: open an RRC session to a hub (RRC tab click / manual hash)."""
+    import uasyncio as asyncio
+    asyncio.create_task(_session_task(dest_hash))
+
+
+async def _session_task(dest_hash):
+    """Path -> link (with retries) -> identify -> HELLO -> WELCOME.
+
+    HELLO is sent once, after the link is ACTIVE and identified. Retrying
+    it on a live link would reset the session server-side and drop us
+    from every room, so only link establishment is retried."""
+    global _link, _dest, _state, _limits, _no_retry
+
+    import uasyncio as asyncio
+    from urns.identity import Identity
+    from urns.transport import Transport
+
+    if is_active():
+        _status("busy - session in progress")
+        return
+    if _no_retry:
+        _status("banned by this hub")
+        return
+
+    my_gen = _task_gen_next()
+    _dest = dest_hash
+    _state = CONNECTING
+    _limits = {}
+
+    try:
+        if not Transport.has_path(dest_hash) or Identity.recall(dest_hash) is None:
+            _status("finding path...")
+            Transport.request_path(dest_hash)
+            for _ in range(CONNECT_PATH_WAIT):
+                await asyncio.sleep(1)
+                if _stale(my_gen):
+                    return
+                if Transport.has_path(dest_hash) and Identity.recall(dest_hash):
+                    break
+            else:
+                _status("no path to hub")
+                _state = CLOSED
+                return
+
+        identity = Identity.recall(dest_hash)
+        if identity is None:
+            _status("unknown identity")
+            _state = CLOSED
+            return
+
+        from urns.link import OutgoingLink
+        from urns.destination import Destination
+        dst = Destination(identity, Destination.OUT, Destination.SINGLE,
+                          P.HUB_APP, P.HUB_ASPECT)
+        hops = max(1, Transport.hops_to(dest_hash))
+        per_attempt = min(90, max(40, 14 * hops))
+        link = None
+        for attempt in range(1, LINK_ATTEMPTS + 1):
+            if _stale(my_gen):
+                return
+            _status("linking..." if attempt == 1
+                    else "linking retry %d/%d..." % (attempt, LINK_ATTEMPTS))
+            if attempt > 1:
+                Transport.request_path(dest_hash)
+                await asyncio.sleep(1)
+            await asyncio.sleep_ms(50)
+            link = OutgoingLink(dst, closed_callback=_on_link_closed,
+                                sign_proofs=True)
+            _link = link
+            t0 = time.time()
+            while link.status == OutgoingLink.PENDING and \
+                    time.time() - t0 < per_attempt:
+                await asyncio.sleep_ms(200)
+                if _stale(my_gen):
+                    return
+            if link.status == OutgoingLink.ACTIVE:
+                break
+            try:
+                link.teardown()
+            except Exception:
+                pass
+            link = None
+        if link is None or link.status != OutgoingLink.ACTIVE:
+            _status("link failed")
+            _state = CLOSED
+            return
+
+        _status("identifying...")
+        link.set_packet_callback(_on_packet)
+        link.identify(_my_identity)
+        await asyncio.sleep_ms(200)
+
+        _status("waiting for WELCOME...")
+        hello_body = {P.B_HELLO_NAME: "tdeck", P.B_HELLO_VER: "1",
+                      P.B_HELLO_CAPS: {}}
+        _send_env(P.make_envelope(P.T_HELLO, src=_my_identity.hash,
+                                  body=hello_body, nick=_nick()))
+        t0 = time.time()
+        while _state == CONNECTING and time.time() - t0 < WELCOME_WAIT:
+            await asyncio.sleep_ms(250)
+            if _stale(my_gen):
+                return
+        if _state == CONNECTING:
+            _status("no WELCOME - hub silent")
+            disconnect()
+    except Exception as e:
+        _status("connect failed: " + str(e))
+        _state = CLOSED
+
+
+def _on_link_closed(link):
+    global _state
+    if link is _link:
+        _state = CLOSED
+        _line("error", None, "!! link closed")
+        if _gui is not None:
+            _gui.rrc_closed()

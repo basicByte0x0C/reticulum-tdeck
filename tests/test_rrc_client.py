@@ -41,6 +41,9 @@ class FakeGui:
     def wake_screen(self):
         pass
 
+    def rrc_closed(self):
+        pass
+
 
 def _reset():
     g = FakeGui()
@@ -256,6 +259,118 @@ def test_unknown_type_and_junk_do_not_raise():
     rrc_client._on_packet(_env(99, body="whatever"))
     rrc_client._on_packet(b"\xff\xff")
     print("ok test_unknown_type_and_junk_do_not_raise")
+
+
+def test_say_sends_a_msg_envelope_with_room_and_nick():
+    g, link = _session()
+    g.node_name = "tdeck"
+    rrc_client.say("gm from varna")
+    env = P.parse(link.sent[-1])
+    assert env[P.K_T] == P.T_MSG
+    assert env[P.K_ROOM] == "#varna"
+    assert env[P.K_BODY] == "gm from varna"
+    assert env[P.K_NICK] == "tdeck"
+    print("ok test_say_sends_a_msg_envelope_with_room_and_nick")
+
+
+def test_say_sends_action_for_slash_me():
+    g, link = _session()
+    g.node_name = "tdeck"
+    rrc_client.say("/me waves")
+    env = P.parse(link.sent[-1])
+    assert env[P.K_T] == P.T_ACTION
+    assert env[P.K_BODY] == "waves"
+    print("ok test_say_sends_action_for_slash_me")
+
+
+def test_say_passes_other_slash_commands_through_as_msg():
+    g, link = _session()
+    g.node_name = "tdeck"
+    rrc_client.say("/who")
+    env = P.parse(link.sent[-1])
+    assert env[P.K_T] == P.T_MSG and env[P.K_BODY] == "/who"
+    print("ok test_say_passes_other_slash_commands_through_as_msg")
+
+
+def test_say_truncates_to_the_computed_cap():
+    g, link = _session()
+    g.node_name = "tdeck"
+    rrc_client._limits = {P.L_MAX_BODY: 20}
+    rrc_client.say("x" * 100)
+    env = P.parse(link.sent[-1])
+    assert len(env[P.K_BODY]) == 20
+    print("ok test_say_truncates_to_the_computed_cap")
+
+
+def test_say_truncates_on_utf8_bytes_not_characters():
+    g, link = _session()
+    g.node_name = "tdeck"
+    rrc_client._limits = {P.L_MAX_BODY: 10}
+    rrc_client.say("ä" * 20)          # 2 bytes each, 40 bytes total
+    env = P.parse(link.sent[-1])
+    assert len(env[P.K_BODY].encode("utf-8")) <= 10
+    print("ok test_say_truncates_on_utf8_bytes_not_characters")
+
+
+def test_say_is_refused_while_rate_limited():
+    g, link = _session()
+    g.node_name = "tdeck"
+    rrc_client._backoff_until = time.time() + 10
+    sent_before = len(link.sent)
+    rrc_client.say("hello")
+    assert len(link.sent) == sent_before
+    rrc_client._backoff_until = 0
+    print("ok test_say_is_refused_while_rate_limited")
+
+
+def test_join_sends_room_and_optional_key():
+    g, link = _session(room=None)
+    rrc_client._state = rrc_client.READY
+    rrc_client.join("#varna")
+    env = P.parse(link.sent[-1])
+    assert env[P.K_T] == P.T_JOIN and env[P.K_ROOM] == "#varna"
+    assert P.K_BODY not in env
+    rrc_client.join("#secret", key="hunter2")
+    env = P.parse(link.sent[-1])
+    assert env[P.K_BODY] == "hunter2"
+    print("ok test_join_sends_room_and_optional_key")
+
+
+def test_join_lowercases_the_room_name():
+    g, link = _session(room=None)
+    rrc_client._state = rrc_client.READY
+    rrc_client.join("  #Varna  ")
+    env = P.parse(link.sent[-1])
+    assert env[P.K_ROOM] == "#varna"
+    print("ok test_join_lowercases_the_room_name")
+
+
+def test_part_sends_part_and_returns_to_ready():
+    g, link = _session()
+    rrc_client.part()
+    env = P.parse(link.sent[-1])
+    assert env[P.K_T] == P.T_PART and env[P.K_ROOM] == "#varna"
+    assert rrc_client._state == rrc_client.READY
+    assert rrc_client._room is None
+    print("ok test_part_sends_part_and_returns_to_ready")
+
+
+def test_mention_uses_at_nick_when_unique():
+    g, link = _session()
+    rrc_client._roster = {b"\x11" * 16: "sam", b"\x22" * 16: "kc1awv"}
+    assert rrc_client.mention_for(b"\x11" * 16) == "@sam"
+    print("ok test_mention_uses_at_nick_when_unique")
+
+
+def test_mention_falls_back_to_hash_when_ambiguous_or_unknown():
+    g, link = _session()
+    dup = b"\x11" * 16
+    rrc_client._roster = {dup: "sam", b"\x22" * 16: "sam"}
+    assert rrc_client.mention_for(dup) == "@" + dup.hex()[:8]
+    silent = b"\x33" * 16
+    rrc_client._roster[silent] = None
+    assert rrc_client.mention_for(silent) == "@" + silent.hex()[:8]
+    print("ok test_mention_falls_back_to_hash_when_ambiguous_or_unknown")
 
 
 if __name__ == "__main__":
