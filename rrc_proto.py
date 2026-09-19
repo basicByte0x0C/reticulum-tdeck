@@ -1,9 +1,13 @@
 # RRC wire constants and the envelope layer, split out of the session the
 # way rnsh_proto.py is split out of rnsh_client.py.
 #
-# Constants are copied from rrcd/constants.py; see FR-rrc-client.md for
-# the source citations. Nothing here touches the radio, so it is all
-# host-testable.
+# Wire protocol constants (RRC_VERSION, envelope keys, message types, HELLO/WELCOME
+# body keys, WELCOME limits keys) are copied from rrcd/constants.py and are
+# authoritative for on-wire compatibility. Local defaults (ENVELOPE_OVERHEAD,
+# DEFAULT_MAX_BODY, DEFAULT_MAX_NICK) and the ERR_* strings are not in rrcd/constants.py
+# — they come from rrcd/config.py defaults and the hub's wire behaviour.
+# See FR-rrc-client.md for the source citations. Nothing here touches the radio,
+# so it is all host-testable.
 
 import os
 import time
@@ -97,11 +101,17 @@ def now_ms(epoch_s=None):
 
 
 def normalize_nick(value, max_bytes=DEFAULT_MAX_NICK):
-    """Trim, strip control characters, truncate to a UTF-8 byte budget.
+    """Trim, strip LF/CR/NUL, truncate to a UTF-8 byte budget.
 
     Mirrors rrcd/util.py normalize_nick, except that it truncates where
-    the hub rejects: the node display name is not ours to refuse."""
+    the hub rejects: the node display name is not ours to refuse. The budget
+    arrives from a hub's WELCOME limits map as untrusted CBOR: it can be
+    negative, or not an integer at all. Either way we send no nick rather than
+    looping forever on a budget that can never be met -- a nickless member is
+    valid, a hung device is not."""
     if not value:
+        return None
+    if not isinstance(max_bytes, int) or max_bytes <= 0:
         return None
     s = value.strip()
     for bad in ("\n", "\r", "\x00"):

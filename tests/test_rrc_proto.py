@@ -89,6 +89,24 @@ def test_now_ms_handles_micropython_2000_epoch():
     print("ok test_now_ms_handles_micropython_2000_epoch")
 
 
+def test_normalize_nick_rejects_impossible_budgets():
+    # A hub's WELCOME limits map is untrusted CBOR: any of these would
+    # otherwise spin the truncation loop forever.
+    assert P.normalize_nick("tdeck", max_bytes=0) is None
+    assert P.normalize_nick("tdeck", max_bytes=-1) is None
+    assert P.normalize_nick("tdeck", max_bytes="32") is None
+    assert P.normalize_nick("tdeck", max_bytes=None) is None
+    print("ok test_normalize_nick_rejects_impossible_budgets")
+
+
+def test_normalize_nick_budget_smaller_than_one_character():
+    # One 2-byte character against a 1-byte budget: must terminate and
+    # must never emit half a UTF-8 sequence.
+    out = P.normalize_nick("ä", max_bytes=1)
+    assert out is None, out
+    print("ok test_normalize_nick_budget_smaller_than_one_character")
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):
