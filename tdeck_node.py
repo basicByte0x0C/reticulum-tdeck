@@ -1555,9 +1555,9 @@ def _auto_connect_wifi():
         NODE_NAME = saved_name
         gui.node_name = saved_name
         _apply_display_name(saved_name)
-    if settings.get("kbd_backlight") and board.set_kbd_backlight(True):
-        gui._kbd_bl = True      # the saved preference
-        gui._kbd_bl_lit = True  # and the state it just left the hardware in
+    # Always write the preference -- an OFF too. The keyboard MCU keeps its
+    # own backlight state across an S3 restart and M5Launcher leaves it lit.
+    gui.restore_kbd_backlight(settings.get("kbd_backlight"))
     saved_vol = settings.get("volume")
     if saved_vol is not None:
         sound.set_volume(saved_vol)

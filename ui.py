@@ -59,13 +59,17 @@ _SET_RADIO     = 5
 _SET_LORA      = 6   # editable radio params (freq/bw/sf/cr/tx)
 _SET_LORA_FREQ = 7   # numeric entry sub-page for the frequency
 
-# LoRa radio config: allowed values for the editor. BW is offered as the
-# three practical LoRa bandwidths (the SX1262 also supports narrower ones,
-# rarely used on a mesh). SF/CR/TX clamp at their bounds; freq is stepped
-# or typed in kHz. These are the ranges the sx126x driver's configure()
+# LoRa radio config: allowed values for the editor. BW cycles through every
+# bandwidth the SX1262 has (the exact key set of the sx126x driver's
+# configure() table, ascending) -- a mesh on a custom plan may sit on 62.5 or
+# 31.25 kHz (issue #9). Free text would only snap to one of these anyway.
+# Below 62.5 kHz both radios need TCXO-grade frequency accuracy; a peer on a
+# plain 20 ppm crystal is ~17 kHz off at 868 MHz. SF/CR/TX clamp at their
+# bounds; freq is stepped or typed in kHz. These are the ranges the driver
 # accepts (SF 6-12, CR 4/5-4/8), narrowed to sane mesh values.
 _LORA_FIELDS = ("freq_khz", "bw", "sf", "coding_rate", "tx_power")
-_LORA_BW_CHOICES = ("125", "250", "500")
+_LORA_BW_CHOICES = ("7.8", "10.4", "15.6", "20.8", "31.25", "41.7", "62.5",
+                    "125", "250", "500")
 _LORA_SF_MIN = 7
 _LORA_SF_MAX = 12
 _LORA_CR_MIN = 5     # 4/5
@@ -668,6 +672,22 @@ class UI:
         """Alt+B. Goes through the preference so the Settings screen agrees,
         the choice is persisted, and sleep/wake keep tracking it."""
         return self.set_kbd_backlight_pref(not self._kbd_bl)
+
+    def restore_kbd_backlight(self, on):
+        """Boot: write the saved preference to the keyboard, on OR off.
+
+        The v1 keyboard is its own MCU and keeps its backlight state across
+        an S3 restart; M5Launcher leaves it lit (issue #10). Only driving an
+        ON here, and trusting the keyboard to power up dark, let that light
+        survive a saved OFF. Drives without persisting: the setting is what
+        we are restoring from. Returns False when the write was refused, in
+        which case the recorded state is left as it was.
+        """
+        on = bool(on)
+        if not self._drive_kbd_backlight(on):
+            return False
+        self._kbd_bl = on
+        return True
 
     def set_kbd_backlight_pref(self, on):
         """The user changed the setting: persist it, and match the hardware."""

@@ -98,10 +98,32 @@ def test_bw_cycles_and_wraps():
     assert g._lora_edit["bw"] == "250"
     g._settings_adjust(1)
     assert g._lora_edit["bw"] == "500"
-    g._settings_adjust(1)                     # wraps
-    assert g._lora_edit["bw"] == "125"
+    g._settings_adjust(1)                     # wraps to the narrowest
+    assert g._lora_edit["bw"] == "7.8"
     g._settings_adjust(-1)                    # wraps back
     assert g._lora_edit["bw"] == "500"
+    g._settings_adjust(-1)
+    g._settings_adjust(-1)
+    g._settings_adjust(-1)                    # 250 -> 125 -> 62.5 (issue #9)
+    assert g._lora_edit["bw"] == "62.5"
+
+
+def test_bw_choices_match_the_sx126x_driver_table():
+    """Issue #9: offer every bandwidth the radio actually has. The choice
+    list must be exactly the driver's configure() table (as strings, in
+    ascending order) so cycling is monotonic and nothing is offered the
+    modem would reject."""
+    import re
+    src = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "lib", "lora", "sx126x.py")).read()
+    driver = re.findall(r'"([0-9.]+)":\s*\(0x[0-9A-Fa-f]{2},\s*\d+\)', src)
+    assert len(driver) == 10, driver
+    assert list(ui._LORA_BW_CHOICES) == sorted(driver, key=float)
+    assert "62.5" in ui._LORA_BW_CHOICES
+    # Every choice is a plain decimal so the urns bitrate formula's float()
+    # accepts it as-is.
+    for c in ui._LORA_BW_CHOICES:
+        float(c)
 
 
 def test_sf_clamps_at_bounds():

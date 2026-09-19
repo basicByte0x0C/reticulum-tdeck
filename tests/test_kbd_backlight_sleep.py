@@ -206,6 +206,37 @@ def test_a_refused_drive_leaves_the_state_honest():
     check("a refused drive leaves _kbd_bl_lit true", d.gui._kbd_bl_lit is True)
 
 
+def test_boot_restore_drives_the_saved_preference_either_way():
+    """Issue #10: the keyboard MCU keeps its own backlight state across an
+    S3 restart, and M5Launcher leaves it lit. Boot must therefore always
+    write the saved preference to the hardware -- an OFF included -- not
+    assume the keyboard powers up dark."""
+    print("boot restore writes the preference to the keyboard, on or off")
+    d = Deck(display_backlight=True)
+    d.lit = True                       # what the launcher left behind
+    check("restoring OFF returns True", d.gui.restore_kbd_backlight(False) is True)
+    check("restoring OFF puts the light out", d.lit is False, str(d.drives))
+    check("restoring OFF drove exactly one write", d.drives == [False], str(d.drives))
+    check("preference is off", d.gui._kbd_bl is False)
+    check("hardware state is off", d.gui._kbd_bl_lit is False)
+    check("boot restore never rewrites settings.json", d.saves == [], str(d.saves))
+
+    d = Deck(display_backlight=True)
+    check("restoring ON lights it", d.gui.restore_kbd_backlight(True) is True and d.lit is True)
+    check("preference and state are on", d.gui._kbd_bl is True and d.gui._kbd_bl_lit is True)
+    check("still no settings write", d.saves == [], str(d.saves))
+
+
+def test_boot_restore_refused_write_leaves_state_honest():
+    """A pre-2023 keyboard ignores the command and the board returns False.
+    The UI must not then claim the light matches the preference."""
+    print("a refused boot restore is not recorded as success")
+    d = Deck(display_backlight=True)
+    d.gui.on_kbd_backlight_drive = lambda on: False
+    check("returns False", d.gui.restore_kbd_backlight(True) is False)
+    check("state untouched", d.gui._kbd_bl is False and d.gui._kbd_bl_lit is False)
+
+
 if __name__ == "__main__":
     test_light_follows_sleep_without_a_display_backlight()
     test_an_explicit_off_survives_a_wake()
@@ -214,6 +245,8 @@ if __name__ == "__main__":
     test_toggling_off_while_awake_puts_it_out()
     test_alt_b_goes_through_the_preference()
     test_a_refused_drive_leaves_the_state_honest()
+    test_boot_restore_drives_the_saved_preference_either_way()
+    test_boot_restore_refused_write_leaves_state_honest()
     print()
     if _failures:
         print("%d FAILED: %s" % (len(_failures), ", ".join(_failures)))
