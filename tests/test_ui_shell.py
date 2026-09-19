@@ -76,6 +76,8 @@ def _type(g, s):
 
 def test_trackball_cycles_into_ssh_tab():
     # Regression: the trackball must reach the SSH tab (was capped at MSG/NET).
+    # Since the RRC tab landed it must carry on through that one too, so this
+    # also pins the fourth tab as trackball-reachable.
     g = _mkui()
     assert g.node_tab == ui.TAB_MSG
     g._irq_right = 1; g.handle_trackball()
@@ -83,9 +85,11 @@ def test_trackball_cycles_into_ssh_tab():
     g._irq_right = 1; g.handle_trackball()
     assert g.node_tab == ui.TAB_SSH          # previously unreachable
     g._irq_right = 1; g.handle_trackball()
+    assert g.node_tab == ui.TAB_RRC          # fourth tab
+    g._irq_right = 1; g.handle_trackball()
     assert g.node_tab == ui.TAB_MSG          # wraps around
     g._irq_left = 1; g.handle_trackball()
-    assert g.node_tab == ui.TAB_SSH          # left wraps back to SSH
+    assert g.node_tab == ui.TAB_RRC          # left wraps back to the last tab
 
 
 def test_ssh_tab_lists_nodes():
