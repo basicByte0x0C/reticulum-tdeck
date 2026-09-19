@@ -1074,7 +1074,13 @@ class UI:
                                  ("No nodes yet.", "Waiting for node announces..."))
             _total = len(self._node_keys)
             _scroll = self.net_scroll
-        else:
+        elif self.node_tab == TAB_RRC:
+            self._draw_list_rows(self._rrc_keys, self.rrc_hubs, self._rrc_scroll,
+                                 self._rrc_idx, False,
+                                 ("No RRC hubs.", "(m) to enter a hash"))
+            _total = len(self._rrc_keys)
+            _scroll = self._rrc_scroll
+        else:  # TAB_SSH
             self._draw_list_rows(self._shell_keys, self.shell_nodes, self.ssh_scroll,
                                  self.ssh_idx, False,
                                  ("No rnsh nodes.", "(m) to enter a hash"))
@@ -1804,7 +1810,10 @@ class UI:
                 self._enter_chat()
             elif self.node_tab == TAB_NET:
                 self._open_selected_node()
-            else:
+            elif self.node_tab == TAB_RRC:
+                import rrc_ui
+                rrc_ui.open_selected_hub(self)
+            else:  # TAB_SSH
                 self._open_selected_shell()
             return True
         return False
@@ -1824,6 +1833,11 @@ class UI:
         elif tab == TAB_SSH and self.on_shell_seed:
             try:
                 self.on_shell_seed()
+            except Exception:
+                pass
+        elif tab == TAB_RRC and self.on_rrc_seed:
+            try:
+                self.on_rrc_seed()
             except Exception:
                 pass
         self._cache = [''] * CACHE_ROWS  # rows, tab bar and footer all change
