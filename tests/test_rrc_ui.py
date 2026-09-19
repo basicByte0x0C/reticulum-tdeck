@@ -173,6 +173,66 @@ def test_enter_on_rrc_tab_connects_the_hub_not_a_shell():
     print("ok test_enter_on_rrc_tab_connects_the_hub_not_a_shell")
 
 
+def test_non_ascii_hub_text_is_transliterated_before_drawing():
+    # FakeTFT.text does s.encode("ascii") and the device font has no glyphs
+    # beyond ASCII/CP866 either, so an un-_ascii()'d string from a hub is a
+    # crash on hardware, not a cosmetic problem. A hub controls its own name
+    # and the text of every notice it sends.
+    #
+    # ui._ascii() keeps ASCII plus a curated Cyrillic range (the CP866 font
+    # has those glyphs) and DROPS everything else -- accented Latin, CJK,
+    # emoji -- rather than transliterating it (confirmed against ui._ascii
+    # and ui._CYR directly, not assumed). Cyrillic itself is not a useful
+    # probe for the hub-name line specifically: _draw_header draws
+    # _ascii(left) as a plain str without ui._tb(), so a *kept* Cyrillic
+    # character still reaches FakeTFT.text() as non-ASCII and raises -- a
+    # pre-existing _draw_header gap the coordinator flagged as Task 8's to
+    # fix, not evidence that _ascii() didn't run. A dropped-class character
+    # (accented Latin) exercises the same _ascii(left) call without
+    # tripping that unrelated bug, and a second one in the notice body
+    # covers _ascii(body) in _visible_lines.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g._rrc_hub_name = "Café Hub"                          # e-acute
+    g.rrc_line("notice", None, "room über: тест")  # u-diaeresis + kept Cyrillic
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_rooms(g)                     # must not raise
+    painted = _painted(g.tft.calls)
+    assert "é" not in painted, painted  # the hub name's e-acute
+    assert "ü" not in painted, painted  # the notice's u-diaeresis
+    assert "Caf Hub" in painted, painted     # the rest of the hub name survives
+    print("ok test_non_ascii_hub_text_is_transliterated_before_drawing")
+
+
+def test_trackball_scroll_on_rrc_tab_does_not_touch_ssh_state():
+    g = make_ui()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    for i in range(4):
+        g.add_rrc_hub(bytes([i]) * 16, name="hub%d" % i, hops=1)
+    g.add_shell_node(b"\xee" * 16, name="listener", hops=1)
+    g.ssh_idx = 0
+    g._irq_down = 1; g.handle_trackball()
+    assert g._rrc_idx == 1, g._rrc_idx
+    assert g.ssh_idx == 0, "scrolling the RRC tab moved the SSH selection"
+    print("ok test_trackball_scroll_on_rrc_tab_does_not_touch_ssh_state")
+
+
+def test_trackball_click_on_rrc_tab_opens_the_hub():
+    g = make_ui()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    g.add_rrc_hub(b"\x42" * 16, name="Varna Hub", hops=2)
+    g._rrc_idx = 0
+    connected = []
+    g.on_rrc_connect = lambda dest: connected.append(dest)
+    g._irq_click = 1; g.handle_trackball()
+    assert connected == [b"\x42" * 16], connected
+    assert g.state == U.STATE_RRC_ROOMS, g.state
+    print("ok test_trackball_click_on_rrc_tab_opens_the_hub")
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):

@@ -3418,6 +3418,9 @@ class UI:
                     self._enter_chat()
                 elif self.node_tab == TAB_NET:
                     self._open_selected_node()
+                elif self.node_tab == TAB_RRC:
+                    import rrc_ui
+                    rrc_ui.open_selected_hub(self)
                 elif self.node_tab == TAB_SSH and not self._shell_manual:
                     self._open_selected_shell()
             elif self.state == STATE_BROWSER:
@@ -3462,6 +3465,11 @@ class UI:
                     self.net_idx -= 1
                     if self.net_idx < self.net_scroll:
                         self.net_scroll = self.net_idx
+            elif self.node_tab == TAB_RRC:
+                if self._rrc_idx > 0:
+                    self._rrc_idx -= 1
+                    if self._rrc_idx < self._rrc_scroll:
+                        self._rrc_scroll = self._rrc_idx
             else:  # TAB_SSH
                 if self.ssh_idx > 0:
                     self.ssh_idx -= 1
@@ -3510,6 +3518,11 @@ class UI:
                     self.net_idx += 1
                     if self.net_idx >= self.net_scroll + _rows:
                         self.net_scroll = self.net_idx - _rows + 1
+            elif self.node_tab == TAB_RRC:
+                if self._rrc_idx < len(self._rrc_keys) - 1:
+                    self._rrc_idx += 1
+                    if self._rrc_idx >= self._rrc_scroll + _rows:
+                        self._rrc_scroll = self._rrc_idx - _rows + 1
             else:  # TAB_SSH
                 if self.ssh_idx < len(self._shell_keys) - 1:
                     self.ssh_idx += 1

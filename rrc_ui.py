@@ -8,9 +8,11 @@
 # The client interprets structured fields; everything the hub says in
 # prose is painted as prose. That is why there is no parser here.
 
-from ui import (BODY_Y, CHAR_H, CHAR_W, COLS, INPUT_Y, SCREEN_W, SCREEN_H,
-                SEP_Y, BODY_ROWS, STATE_NODES, STATE_RRC_CHAT, STATE_RRC_ROOMS,
+from ui import (BODY_Y, CHAR_H, CHAR_W, COLS, INPUT_Y, SCREEN_W,
+                BODY_ROWS, STATE_NODES, STATE_RRC_ROOMS,
                 TAB_RRC, _pad, _ascii)
+# SCREEN_H, SEP_Y and STATE_RRC_CHAT are unused here -- Task 8's room view
+# re-imports what it needs when it lands.
 
 
 def open_selected_hub(ui):
