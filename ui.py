@@ -3540,18 +3540,20 @@ class UI:
                 self._shell_menu_move(-1)
             else:
                 self._shell_scroll(1)     # scroll terminal toward older output
-        elif self.state == STATE_RRC_CHAT:
-            # Panel-open is handled earlier in handle_trackball and never
-            # reaches here. One tick = one wrapped line toward older
-            # scrollback, clamped so the window can't run past the top
-            # (same flatten _visible_lines uses, so the clamp matches what
-            # actually gets drawn).
+        elif self.state in (STATE_RRC_CHAT, STATE_RRC_ROOMS):
+            # Covers both RRC screens that render through _visible_lines --
+            # the room view and the hub console (MOTD / "/list" replies,
+            # both routinely longer than one screen). Panel-open is handled
+            # earlier in handle_trackball and never reaches here. One tick
+            # = one wrapped line toward older scrollback, clamped so the
+            # window can't run past the top (same flatten _visible_lines
+            # uses, so the clamp matches what actually gets drawn).
             import rrc_ui
             rows = BODY_ROWS - 1
             max_scroll = max(0, len(rrc_ui._flatten(self)) - rows)
             if self._rrc_scroll_chat < max_scroll:
                 self._rrc_scroll_chat += 1
-        else:
+        elif self.state == STATE_CHAT:
             # Move cursor up; scroll viewport when cursor reaches top
             _chat_rows = BODY_ROWS - 1
             if self.chat_cursor < 0:
@@ -3563,6 +3565,14 @@ class UI:
                 # never shrinks past the oldest full window)
                 if self.chat_scroll < max(0, len(self._build_chat_lines()) - _chat_rows):
                     self.chat_scroll += 1
+        else:
+            # A state that wants trackball scrolling must claim it above --
+            # this used to be a bare `else:` that silently meant "the LXMF
+            # chat view" (STATE_RRC_CHAT/STATE_RRC_ROOMS both fell into it
+            # in turn before they got their own branch). Doing nothing here
+            # is a screen that just doesn't scroll, which gets noticed;
+            # inheriting chat_cursor/chat_scroll doesn't.
+            pass
 
     def _scroll_down(self):
         if self.state == STATE_IMAGE:
@@ -3606,13 +3616,13 @@ class UI:
                 self._shell_menu_move(1)
             else:
                 self._shell_scroll(-1)    # scroll terminal toward newer output
-        elif self.state == STATE_RRC_CHAT:
+        elif self.state in (STATE_RRC_CHAT, STATE_RRC_ROOMS):
             # One tick = one wrapped line toward the newest message; 0 is
             # the floor -- rrc_line() already snaps here on arrival, so
             # this only ever needs to climb back down to it.
             if self._rrc_scroll_chat > 0:
                 self._rrc_scroll_chat -= 1
-        else:
+        elif self.state == STATE_CHAT:
             # Move cursor down; scroll viewport when cursor reaches bottom
             _chat_rows = BODY_ROWS - 1
             if self.chat_cursor < 0:
@@ -3623,6 +3633,10 @@ class UI:
                 # Cursor at bottom — scroll viewport down
                 if self.chat_scroll > 0:
                     self.chat_scroll -= 1
+        else:
+            # A state that wants trackball scrolling must claim it above --
+            # see the matching comment in _scroll_up.
+            pass
 
     def _settings_scroll_up(self):
         if self._settings_page == _SET_MAIN:

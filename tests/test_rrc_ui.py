@@ -721,6 +721,45 @@ def test_new_message_resets_scroll_after_reading_back():
     print("ok test_new_message_resets_scroll_after_reading_back")
 
 
+def test_trackball_scroll_in_the_hub_console_does_not_touch_lxmf_chat_state():
+    # _scroll_up/_scroll_down's bare `else:` meant "the LXMF chat view" --
+    # STATE_RRC_ROOMS (the hub console, pre-join) wasn't listed, so
+    # trackball up/down there fell through into chat_cursor/chat_scroll,
+    # state that belongs to an unrelated screen. Prove the console scrolls
+    # its own scrollback and leaves that state alone.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    for i in range(40):
+        g.rrc_line("notice", None, "  #room%d - topic" % i)
+    g.chat_cursor = 3
+    g.chat_scroll = 2
+    g._irq_up = 1; g.handle_trackball()
+    assert g._rrc_scroll_chat > 0, "the console did not scroll"
+    assert (g.chat_cursor, g.chat_scroll) == (3, 2), "it moved the LXMF chat view"
+    print("ok test_trackball_scroll_in_the_hub_console_does_not_touch_lxmf_chat_state")
+
+
+def test_trackball_up_clamps_at_the_top_of_the_hub_console():
+    # Mirrors test_trackball_up_clamps_at_the_top_of_scrollback for the
+    # room view, but for STATE_RRC_ROOMS: the console's own buffer must
+    # not be scrollable past its oldest line either.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    for i in range(40):
+        g.rrc_line("notice", None, "  #room%d - topic" % i)
+    import rrc_ui
+    rows = U.BODY_ROWS - 1
+    max_scroll = len(rrc_ui._flatten(g)) - rows
+    g._irq_up = 100         # spin far past the available scrollback in one drain
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == max_scroll, (g._rrc_scroll_chat, max_scroll)
+    g.tft.calls = []
+    rrc_ui.draw_rooms(g)
+    painted = _painted(g.tft.calls)
+    assert "#room0 - topic" in painted, painted   # the oldest notice is now on screen
+    print("ok test_trackball_up_clamps_at_the_top_of_the_hub_console")
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):
