@@ -87,9 +87,17 @@ class FakeLink:
     def __init__(self):
         self.sent = []
         self.mdu = 431
+        self.torn_down = False
 
     def send(self, data):
         self.sent.append(bytes(data))
+
+    def teardown(self):
+        # urns' OutgoingLink.teardown() invokes closed_callback synchronously
+        # (link.py _close). The fake must too, or the tests cannot see a
+        # teardown that paints a spurious error at the user.
+        self.torn_down = True
+        rrc_client._on_link_closed(self)
 
 
 def _session(room="#varna"):
@@ -371,6 +379,26 @@ def test_mention_falls_back_to_hash_when_ambiguous_or_unknown():
     rrc_client._roster[silent] = None
     assert rrc_client.mention_for(silent) == "@" + silent.hex()[:8]
     print("ok test_mention_falls_back_to_hash_when_ambiguous_or_unknown")
+
+
+def test_intentional_disconnect_is_not_reported_as_a_dropped_link():
+    g, link = _session()
+    rrc_client.disconnect()
+    assert link.torn_down is True
+    assert not [ln for ln in g.lines if ln[0] == "error"], g.lines
+    assert rrc_client._link is None
+    print("ok test_intentional_disconnect_is_not_reported_as_a_dropped_link")
+
+
+def test_join_while_joined_parts_the_old_room_first():
+    g, link = _session(room="#varna")          # already JOINED
+    rrc_client.join("#dx")
+    kinds = [P.parse(p)[P.K_T] for p in link.sent[-2:]]
+    assert kinds == [P.T_PART, P.T_JOIN], kinds
+    assert P.parse(link.sent[-2])[P.K_ROOM] == "#varna"
+    assert P.parse(link.sent[-1])[P.K_ROOM] == "#dx"
+    assert rrc_client._state == rrc_client.READY   # awaiting the JOIN reply
+    print("ok test_join_while_joined_parts_the_old_room_first")
 
 
 if __name__ == "__main__":

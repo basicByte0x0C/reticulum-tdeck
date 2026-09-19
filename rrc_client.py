@@ -348,6 +348,11 @@ def join(room, key=None):
     name = room.strip().lower()     # rrcd normalises exactly this way
     if not name:
         return False
+    if _state == JOINED:
+        # One room at a time. Leaving first stops the hub relaying the old
+        # room's traffic, and returns _state to READY so the new room's
+        # JOINED reply is recognised as our own join rather than an arrival.
+        part()
     _room = name
     _roster.clear()
     return _send_env(P.make_envelope(P.T_JOIN, src=_my_identity.hash,
@@ -372,12 +377,13 @@ def disconnect():
     global _link, _state, _room, _limits, _hub_name
     if _state == JOINED:
         part()
-    if _link is not None:
-        try:
-            _link.teardown()
+    link = _link
+    _link = None          # cleared first: teardown() fires the closed
+    if link is not None:  # callback synchronously, and a deliberate close
+        try:              # must not be painted as a dropped link
+            link.teardown()
         except Exception:
             pass
-    _link = None
     _room = None
     _limits = {}
     _hub_name = None
@@ -437,12 +443,14 @@ async def _session_task(dest_hash):
                 if Transport.has_path(dest_hash) and Identity.recall(dest_hash):
                     break
             else:
+                _link = None
                 _status("no path to hub")
                 _state = CLOSED
                 return
 
         identity = Identity.recall(dest_hash)
         if identity is None:
+            _link = None
             _status("unknown identity")
             _state = CLOSED
             return
@@ -463,23 +471,30 @@ async def _session_task(dest_hash):
                 Transport.request_path(dest_hash)
                 await asyncio.sleep(1)
             await asyncio.sleep_ms(50)
-            link = OutgoingLink(dst, closed_callback=_on_link_closed,
-                                sign_proofs=True)
-            _link = link
+            candidate = OutgoingLink(dst, closed_callback=_on_link_closed,
+                                     sign_proofs=True)
             t0 = time.time()
-            while link.status == OutgoingLink.PENDING and \
+            while candidate.status == OutgoingLink.PENDING and \
                     time.time() - t0 < per_attempt:
                 await asyncio.sleep_ms(200)
                 if _stale(my_gen):
+                    try:
+                        candidate.teardown()
+                    except Exception:
+                        pass
                     return
-            if link.status == OutgoingLink.ACTIVE:
+            if candidate.status == OutgoingLink.ACTIVE:
+                link = candidate
+                _link = link            # _link only ever names an ACTIVE link
                 break
             try:
-                link.teardown()
+                # _link is not this candidate, so the synchronous closed
+                # callback cannot flip _state mid-retry.
+                candidate.teardown()
             except Exception:
                 pass
-            link = None
         if link is None or link.status != OutgoingLink.ACTIVE:
+            _link = None
             _status("link failed")
             _state = CLOSED
             return
@@ -503,6 +518,7 @@ async def _session_task(dest_hash):
             _status("no WELCOME - hub silent")
             disconnect()
     except Exception as e:
+        _link = None
         _status("connect failed: " + str(e))
         _state = CLOSED
 
