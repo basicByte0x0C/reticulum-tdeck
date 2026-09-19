@@ -151,9 +151,15 @@ def test_duplicate_msg_id_is_rendered_once():
 
 def test_joined_body_seeds_the_roster():
     g, link = _session()
+    rrc_client._state = rrc_client.READY          # we sent JOIN, not in yet
+    rrc_client._roster = {b"\x99" * 16: "stale"}  # left from a previous room
     members = [b"\x11" * 16, b"\x22" * 16, b"\x33" * 16]
-    rrc_client._on_packet(_env(P.T_JOINED, room="#varna", body=members))
-    assert len(rrc_client._roster) == 3
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_JOINED, src=b"\xaa" * 16, room="#varna", body=members)))
+    assert rrc_client._state == rrc_client.JOINED
+    assert g.joined == ["#varna"], g.joined
+    assert set(rrc_client._roster) == set(members), rrc_client._roster
+    assert b"\x99" * 16 not in rrc_client._roster, "stale member survived the reseed"
     assert g.rosters[-1] == 3
     print("ok test_joined_body_seeds_the_roster")
 
@@ -164,10 +170,25 @@ def test_joined_event_adds_a_member_and_parted_removes_one():
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=b"\xaa" * 16, room="#varna", body=[who], nick="sam")))
     assert who in rrc_client._roster
+    assert len(rrc_client._roster) == 1
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_PARTED, src=b"\xaa" * 16, room="#varna", body=[who], nick="sam")))
     assert who not in rrc_client._roster
+    assert len(rrc_client._roster) == 0
     print("ok test_joined_event_adds_a_member_and_parted_removes_one")
+
+
+def test_joined_event_never_adds_the_hub_to_the_roster():
+    g, link = _session()                          # already JOINED
+    hub = b"\xaa" * 16
+    who = b"\x55" * 16
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_JOINED, src=hub, room="#varna", body=[who], nick="sam")))
+    assert who in rrc_client._roster
+    assert hub not in rrc_client._roster, "K_SRC on JOINED is the hub, not a member"
+    assert len(rrc_client._roster) == 1, rrc_client._roster
+    assert rrc_client._roster[who] == "sam"
+    print("ok test_joined_event_never_adds_the_hub_to_the_roster")
 
 
 def test_nick_is_learned_from_incoming_messages():

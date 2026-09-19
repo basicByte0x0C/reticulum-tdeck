@@ -221,27 +221,30 @@ def _on_packet(data, packet=None):
         return
 
     if t == P.T_JOINED:
-        if nick:
-            _remember(src, nick)
-        if isinstance(body, list):
-            if _state != JOINED:
-                # Our own JOIN reply: the body is the whole member list.
-                _roster.clear()
+        if _state != JOINED:
+            # Our own JOIN reply: the body is the room's entire member
+            # list, and there is no nick -- it is not an arrival event.
+            _roster.clear()
+            if isinstance(body, list):
                 for member in body:
                     _remember(member, None)
-            else:
-                for member in body:
-                    _remember(member, nick)
-        if _state != JOINED:
             _state = JOINED
             if _gui is not None:
                 _gui.rrc_joined(env.get(P.K_ROOM))
-        elif nick:
-            _line("event", None, "* " + nick + " joined")
+        else:
+            # Somebody else arrived. K_SRC is the hub; the body carries
+            # the one identity that actually joined, and K_NICK names it.
+            if isinstance(body, list):
+                for member in body:
+                    _remember(member, nick)
+            if nick:
+                _line("event", None, "* " + nick + " joined")
         _roster_changed()
         return
 
     if t == P.T_PARTED:
+        # Roster accuracy depends on the hub's include_joined_member_list
+        # config: when off, T_PARTED bodies are None and departures linger.
         if isinstance(body, list):
             for member in body:
                 if isinstance(member, (bytes, bytearray)):
