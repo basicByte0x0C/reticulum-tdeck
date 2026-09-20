@@ -1,13 +1,25 @@
 # RRC wire constants and the envelope layer, split out of the session the
 # way rnsh_proto.py is split out of rnsh_client.py.
 #
-# Wire protocol constants (RRC_VERSION, envelope keys, message types, HELLO/WELCOME
-# body keys, WELCOME limits keys) are copied from rrcd/constants.py and are
-# authoritative for on-wire compatibility. Local defaults (ENVELOPE_OVERHEAD,
-# DEFAULT_MAX_BODY, DEFAULT_MAX_NICK) and the ERR_* strings are not in rrcd/constants.py
-# — they come from rrcd/config.py defaults and the hub's wire behaviour.
-# See FR-rrc-client.md for the source citations. Nothing here touches the radio,
-# so it is all host-testable.
+# Where each value in this file comes from:
+#
+# - Wire protocol constants (RRC_VERSION, envelope keys, message types,
+#   HELLO/WELCOME body keys, WELCOME limits keys) are copied from
+#   rrcd/constants.py and are authoritative for on-wire compatibility.
+# - Local defaults (DEFAULT_MAX_BODY, DEFAULT_MAX_NICK) and the ERR_*
+#   strings are not in rrcd/constants.py — they come from rrcd/config.py
+#   defaults and from the hub's wire behaviour.
+# - Envelope overhead is NOT a constant here and must not become one. It is
+#   measured per session by envelope_overhead(), which encodes this
+#   session's own envelope with an empty body; body_cap() sizes the
+#   composer from that and encode_capped() measures the real packet before
+#   it goes on air. The constant this replaced (ENVELOPE_OVERHEAD = 64,
+#   taken from the spec) was arithmetic on a guess, and it overran the link
+#   MDU by 2 bytes on an ordinary room name and nick — see the comment
+#   above _TS_PROBE.
+#
+# See FR-rrc-client.md for the source citations. Nothing here touches the
+# radio, so it is all host-testable.
 
 import os
 import time
