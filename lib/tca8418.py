@@ -16,6 +16,15 @@
 #
 # There are no dedicated arrow keys and no trackball on this board. Navigation
 # lives on the alt layer: E/X/S/F are up/down/left/right.
+#
+# Note that this is NOT the same alt layer the T-Deck v1 has. The v1 talks to a
+# keyboard co-processor whose alt/sym layer emits control codes (README: Sym or
+# Alt + c/d/z give Ctrl-C/D/Z); here the alt layer is a navigation layer this
+# module defines. Both are correct -- they are different keyboards -- but a
+# result from one board says nothing about the other, so anything riding on the
+# alt layer has to be checked on both. Alt+W is the one deliberate overlap: it
+# emits Ctrl-W here too, matching the v1, so the RRC member panel opens the same
+# way on both boards.
 
 import time
 from micropython import const
@@ -63,6 +72,16 @@ KEY_RIGHT = const(0xB7)
 # desynchronise both. board_tdeck_pro.get_key() routes it to the UI.
 KEY_BL_TOGGLE = const(0xAB)
 
+# Alt+W -> Ctrl-W, which is what opens the RRC member panel (rrc_ui._ALT_W).
+#
+# This board's alt layer is otherwise navigation (E/X/S/F as arrows, plus Tab,
+# Esc and the backlight toggle) rather than the v1 keyboard's control-code
+# layer, so the two schemes differ -- see the module docstring. The W slot was
+# empty, and an empty alt slot falls back to the base character in get_key(),
+# so alt+w used to type a literal 'w'. Filling it with the v1's encoding is
+# what lets one comparison in rrc_ui.handle_key() serve both boards.
+KEY_CTRL_W = const(0x17)
+
 # Layers per key index: (base, shift, sym, alt). None means the key emits
 # nothing on that layer. Index order is row-major across the 4x10 matrix.
 _KEYMAP = (
@@ -74,7 +93,7 @@ _KEYMAP = (
     (b't', b'T', b'(', bytes([KEY_TAB])),
     (b'r', b'R', b'3', None),
     (b'e', b'E', b'2', bytes([KEY_UP])),
-    (b'w', b'W', b'1', None),
+    (b'w', b'W', b'1', bytes([KEY_CTRL_W])),
     (b'q', b'Q', b'#', bytes([KEY_ESC])),
     (bytes([KEY_BSP]), None, None, None),
     (b'l', b'L', b'"', None),
