@@ -266,6 +266,28 @@ def handle_key(ui, ch, key):
         if ch == 13:                     # enter sends the composer line
             text = ui._rrc_input.strip()
             ui._rrc_input = ""
+            if text.lower() == "/who":
+                # Open the member panel instead of sending this to the hub.
+                #
+                # alt+w is the documented way in, and on the v1 keyboard it
+                # is not reachable: README.md says the Sym/Alt control-key
+                # codes depend on the keyboard firmware revision, and this
+                # device emits a plain 'w'. A typed command needs no
+                # modifier, so it works on every board and every revision.
+                #
+                # Not sending it loses nothing. rrcd answers /who in ONE
+                # unchunked envelope and applies no size guard, so past
+                # roughly thirteen members the reply exceeds the link MDU,
+                # fails hub-side and the client receives nothing at all --
+                # which is why the roster is built from JOINED/PARTED in the
+                # first place. The panel shows that roster, so it is both
+                # reachable and more accurate than the hub's answer.
+                ui._rrc_panel = not ui._rrc_panel
+                ui._rrc_panel_idx = 0
+                ui._rrc_panel_scroll = 0
+                _invalidate_rows(ui)
+                ui.dirty = True
+                return True
             # Sending returns the view to the live tail. rrc_line() holds a
             # reader's anchor against arriving traffic, so without this a
             # message sent while scrolled back -- and its local echo --
@@ -329,6 +351,19 @@ def _cap(ui):
         if isinstance(cap, int) and cap > 0:
             return cap
     return _P.DEFAULT_MAX_BODY
+
+
+def _hashed(room):
+    """The room name as we show it: "#" + name, IRC style.
+
+    Display only. rrcd has no "#" semantics -- _norm_room() is just
+    strip().lower() -- so the character is ours, and rrc_client.join()
+    takes it back off before the name reaches the wire. A room whose real
+    name already starts with "#" is left alone rather than doubled.
+    """
+    if not room:
+        return "?"
+    return room if room.startswith("#") else "#" + room
 
 
 def _settled(ui):
@@ -440,7 +475,7 @@ def draw_member_panel(ui):
     # static labels are wrapped too, for consistency, even though they are
     # only ever ASCII. The [hash8] column below is the one deliberate
     # exception -- see its comment.
-    ui.tft.text(ui.font, ui._tb(_ascii(ui._rrc_room or "?")[:14]), _PANEL_TEXT_X,
+    ui.tft.text(ui.font, ui._tb(_ascii(_hashed(ui._rrc_room))[:14]), _PANEL_TEXT_X,
                 PANEL_Y + 3, ui.YELLOW, ui.SEL_BG)
     count = "%d users" % len(roster)
     ui.tft.text(ui.font, ui._tb(count), PANEL_X + PANEL_W - 8 - len(count) * CHAR_W,
@@ -525,7 +560,7 @@ def panel_scroll(ui, delta):
 
 def draw_room(ui):
     """Room scrollback plus the composer."""
-    room = ui._rrc_room or "?"
+    room = _hashed(ui._rrc_room)
     count = ("%d users" % ui._rrc_members) if ui._rrc_members else "? users"
     name = _ascii(room)[:COLS - len(count) - 2]
     # Cached like _draw_header/draw_browser's header -- the key covers

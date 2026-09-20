@@ -409,7 +409,7 @@ def _dispatch(data):
 
     if t == P.T_NOTICE:
         if isinstance(body, str):
-            _line("notice", None, body)
+            _line("notice", None, _hash_room_list(body))
         return
 
     if t == P.T_ERROR:
@@ -424,6 +424,36 @@ def _dispatch(data):
         return
 
     # Unknown type: a future core message or an extension. Ignore it.
+
+
+LIST_HEADER = "Registered public rooms:"
+
+
+def _hash_room_list(text):
+    """Prefix "#" onto the room names in an rrcd /list reply.
+
+    This is the one place the client reads the *shape* of hub prose, and it
+    is deliberately narrow. Everything else renders NOTICEs verbatim,
+    because their wording is an unversioned formatting choice -- so this
+    fires only on rrcd's exact header line and, when a hub words it
+    differently, simply does nothing and the names show bare as before.
+
+    rrcd builds the reply as "  {name}" or "  {name} - {topic}"
+    (commands.py), one room per line under that header.
+    """
+    if not text:
+        return text
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != LIST_HEADER:
+        return text
+    out = [lines[0]]
+    for line in lines[1:]:
+        body = line.strip()
+        if body and not body.startswith("#"):
+            out.append("  #" + body)
+        else:
+            out.append(line)
+    return "\n".join(out)
 
 
 # --- outbound ---------------------------------------------------------------
@@ -553,6 +583,15 @@ def join(room, key=None):
     if _state not in (READY, JOINED) or not room:
         return False
     name = room.strip().lower()     # rrcd normalises exactly this way
+    # The leading "#" is ours, not the hub's. rrcd's _norm_room() only does
+    # strip().lower() -- "#" is an ordinary character there, so "#varna"
+    # and "varna" are different rooms and /list prints names bare. We show
+    # "#varna" everywhere for the IRC convention, so we have to take it
+    # back off here or the name the user reads would join, or silently
+    # create, a different empty room. Known cost of that trade: a room a
+    # hub genuinely named "#varna" is unreachable from this device.
+    if name.startswith("#"):
+        name = name[1:].strip()
     if not name:
         return False
     if _state == JOINED:

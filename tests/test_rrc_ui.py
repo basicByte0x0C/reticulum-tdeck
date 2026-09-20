@@ -173,6 +173,67 @@ def test_j_opens_the_room_name_prompt():
     print("ok test_j_opens_the_room_name_prompt")
 
 
+def test_the_room_header_shows_the_name_irc_style():
+    """The hub stores "varna"; we show "#varna" (display only)."""
+    import rrc_ui
+    g, link = _hub_driven_ui(room="varna")
+    g.rrc_joined("varna")            # what the hub echoed: the bare name
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "#varna" in painted, painted
+    print("ok test_the_room_header_shows_the_name_irc_style")
+
+
+def test_the_room_header_does_not_double_an_existing_hash():
+    import rrc_ui
+    g, link = _hub_driven_ui(room="#varna")
+    g.rrc_joined("#varna")
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    painted = _painted(g.tft.calls)
+    assert "#varna" in painted and "##varna" not in painted, painted
+    print("ok test_the_room_header_does_not_double_an_existing_hash")
+
+
+def test_typing_who_opens_the_panel_instead_of_asking_the_hub():
+    """alt+w is unreachable on the v1 keyboard -- it emits a plain 'w'.
+
+    README.md warns the Sym/Alt control-key codes depend on the keyboard
+    firmware revision, and this hardware proved it. A typed /who needs no
+    modifier, and it must NOT reach the hub: rrcd answers /who in one
+    unchunked envelope with no size guard, so past ~13 members the reply
+    overruns the link MDU and the client gets nothing.
+    """
+    import rrc_ui
+    g, link = _hub_driven_ui()
+    said = []
+    g.on_rrc_say = lambda t: said.append(t)
+    g.state = U.STATE_RRC_CHAT
+    for ch in "/who":
+        rrc_ui.handle_key(g, ord(ch), ch.encode())
+    rrc_ui.handle_key(g, 13, b"\r")
+    assert g._rrc_panel is True, "/who must open the member panel"
+    assert said == [], "/who must not be sent to the hub"
+    assert g._rrc_input == "", g._rrc_input
+    print("ok test_typing_who_opens_the_panel_instead_of_asking_the_hub")
+
+
+def test_who_is_matched_exactly_not_as_a_prefix():
+    """'/whois bob' is a hub command and must still reach the hub."""
+    import rrc_ui
+    g, link = _hub_driven_ui()
+    said = []
+    g.on_rrc_say = lambda t: said.append(t)
+    g.state = U.STATE_RRC_CHAT
+    for ch in "/whois bob":
+        rrc_ui.handle_key(g, ord(ch), ch.encode())
+    rrc_ui.handle_key(g, 13, b"\r")
+    assert said == ["/whois bob"], said
+    assert g._rrc_panel is False, "only a bare /who opens the panel"
+    print("ok test_who_is_matched_exactly_not_as_a_prefix")
+
+
 def test_backspace_closes_the_member_panel():
     """The panel swallows every key it does not handle, so backspace did
     nothing there -- indistinguishable from a stuck overlay. alt+w and a

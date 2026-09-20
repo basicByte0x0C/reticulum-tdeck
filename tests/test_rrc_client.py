@@ -469,7 +469,11 @@ def test_join_sends_room_and_optional_key():
     rrc_client._state = rrc_client.READY
     rrc_client.join("#varna")
     env = P.parse(link.sent[-1])
-    assert env[P.K_T] == P.T_JOIN and env[P.K_ROOM] == "#varna"
+    # The "#" is a display convention of ours and never goes on the wire:
+    # rrcd's _norm_room() is strip().lower() with no "#" semantics, so
+    # "#varna" and "varna" are different rooms there and /list prints them
+    # bare. See test_join_strips_the_display_hash_before_the_wire.
+    assert env[P.K_T] == P.T_JOIN and env[P.K_ROOM] == "varna", env
     assert P.K_BODY not in env
     rrc_client.join("#secret", key="hunter2")
     env = P.parse(link.sent[-1])
@@ -477,12 +481,75 @@ def test_join_sends_room_and_optional_key():
     print("ok test_join_sends_room_and_optional_key")
 
 
+def test_join_strips_the_display_hash_before_the_wire():
+    """We show "#varna"; the hub must hear "varna".
+
+    rrcd's _norm_room() only strips and lowercases, so "#" is an ordinary
+    character to it: sending the name as displayed would join -- or
+    silently create -- a second, empty room next to the real one.
+    """
+    g, link = _session(room=None)
+    for typed in ("#varna", "varna", "  #VARNA  ", "#  varna"):
+        rrc_client._state = rrc_client.READY
+        rrc_client.join(typed)
+        env = P.parse(link.sent[-1])
+        assert env[P.K_ROOM] == "varna", (typed, env)
+    print("ok test_join_strips_the_display_hash_before_the_wire")
+
+
+def test_join_refuses_a_name_that_is_only_a_hash():
+    g, link = _session(room=None)
+    rrc_client._state = rrc_client.READY
+    before = len(link.sent)
+    assert rrc_client.join("#") is False
+    assert len(link.sent) == before, "nothing may go on the wire"
+    print("ok test_join_refuses_a_name_that_is_only_a_hash")
+
+
+def test_the_room_list_is_shown_with_hashes():
+    """rrcd prints /list names bare; we show them IRC style."""
+    g, link = _session()
+    g.lines = []
+    body = "Registered public rooms:\n  varna - chat here\n  general"
+    rrc_client._on_packet(_env(P.T_NOTICE, body=body))
+    text = g.lines[-1][2]
+    assert text == "Registered public rooms:\n  #varna - chat here\n  #general", text
+    print("ok test_the_room_list_is_shown_with_hashes")
+
+
+def test_other_hub_prose_is_never_rewritten():
+    """The /list transform reads the shape of hub prose, which this client
+    otherwise refuses to do. It must fire on rrcd's exact header and
+    nothing else, so a hub that words it differently degrades to bare
+    names rather than having its MOTD mangled."""
+    g, link = _session()
+    for body in ("Welcome to the hub!\n  varna\n  general",
+                 "rooms:\n  varna",
+                 "  varna - chat here"):
+        g.lines = []
+        rrc_client._on_packet(_env(P.T_NOTICE, body=body))
+        assert g.lines[-1][2] == body, g.lines[-1][2]
+    print("ok test_other_hub_prose_is_never_rewritten")
+
+
+def test_a_room_already_named_with_a_hash_is_not_doubled():
+    g, link = _session()
+    g.lines = []
+    body = "Registered public rooms:\n  #varna"
+    rrc_client._on_packet(_env(P.T_NOTICE, body=body))
+    assert g.lines[-1][2] == body, g.lines[-1][2]
+    print("ok test_a_room_already_named_with_a_hash_is_not_doubled")
+
+
 def test_join_lowercases_the_room_name():
     g, link = _session(room=None)
     rrc_client._state = rrc_client.READY
     rrc_client.join("  #Varna  ")
     env = P.parse(link.sent[-1])
-    assert env[P.K_ROOM] == "#varna"
+    # Lowercased and trimmed to match rrcd's _norm_room(); the display "#"
+    # is stripped on the way out (see
+    # test_join_strips_the_display_hash_before_the_wire).
+    assert env[P.K_ROOM] == "varna", env
     print("ok test_join_lowercases_the_room_name")
 
 
@@ -528,8 +595,10 @@ def test_join_while_joined_parts_the_old_room_first():
     rrc_client.join("#dx")
     kinds = [P.parse(p)[P.K_T] for p in link.sent[-2:]]
     assert kinds == [P.T_PART, P.T_JOIN], kinds
+    # PART carries _room verbatim (the fixture set it directly); JOIN goes
+    # through join(), which strips our display "#".
     assert P.parse(link.sent[-2])[P.K_ROOM] == "#varna"
-    assert P.parse(link.sent[-1])[P.K_ROOM] == "#dx"
+    assert P.parse(link.sent[-1])[P.K_ROOM] == "dx"
     assert rrc_client._state == rrc_client.READY   # awaiting the JOIN reply
     print("ok test_join_while_joined_parts_the_old_room_first")
 
