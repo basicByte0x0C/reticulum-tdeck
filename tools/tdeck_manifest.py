@@ -81,6 +81,13 @@ freeze(_root, "micron.py")
 freeze(_root, "nomad_browser.py")
 freeze(_root, "rnsh_proto.py")
 freeze(_root, "rnsh_client.py")
+# RRC (Reticulum Relay Chat). tdeck_node imports rrc_client at boot, so all
+# four must be frozen or the device fails to start -- the shape of the v1.1.0
+# release that shipped without its radio driver.
+freeze(_root, "rrc_cbor.py")
+freeze(_root, "rrc_proto.py")
+freeze(_root, "rrc_client.py")
+freeze(_root, "rrc_ui.py")
 freeze(_root, "terminal.py")
 freeze(_vendor, "lora_boards.py")
 freeze(_vendor + "/peripherals", "adc_reader.py")
