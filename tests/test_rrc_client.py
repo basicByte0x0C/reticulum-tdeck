@@ -315,6 +315,41 @@ def test_welcome_without_caps_map_is_accepted():
     print("ok test_welcome_without_caps_map_is_accepted")
 
 
+def test_welcome_clears_the_connect_progress_status():
+    """The status row must not keep reporting the last connect step.
+
+    connect() ends on _status("waiting for WELCOME...") and never calls
+    _status() again -- its wait loop exits because _state left CONNECTING,
+    then the function returns. With nothing clearing it the header went on
+    rendering the first ten characters of that string, "waiting fo", over a
+    fully established session: the device looked hung while the link was up,
+    identified and welcomed.
+    """
+    g, link = _session()
+    rrc_client._state = rrc_client.CONNECTING
+    rrc_client._status("waiting for WELCOME...")
+    rrc_client._on_packet(_env(P.T_WELCOME, body={P.B_WELCOME_HUB: "Varna Hub"}))
+    assert rrc_client._state == rrc_client.READY
+    assert g.status[-1] == "", g.status
+    print("ok test_welcome_clears_the_connect_progress_status")
+
+
+def test_welcome_without_a_hub_name_still_names_the_header():
+    """draw_rooms() reads an empty hub name as "still connecting".
+
+    rrcd always sends B_WELCOME_HUB, but it is the hub's choice. Passing
+    None through would park the header on "connecting..." for a session
+    that is up -- the same lie the stale status told.
+    """
+    g, link = _session()
+    rrc_client._dest = b"\xc9\x2b\xcc\x48" + b"\x00" * 12
+    rrc_client._state = rrc_client.CONNECTING
+    rrc_client._on_packet(_env(P.T_WELCOME, body={P.B_WELCOME_VER: "rrcd/0.4"}))
+    assert rrc_client._state == rrc_client.READY
+    assert g.welcomed[-1] == "c92bcc48", g.welcomed
+    print("ok test_welcome_without_a_hub_name_still_names_the_header")
+
+
 def test_resource_envelope_is_ignored_quietly():
     g, link = _session()
     before = len(g.lines)
@@ -1018,9 +1053,15 @@ def test_a_non_string_room_never_reaches_the_gui_or_the_wire():
 def test_a_non_string_welcome_hub_name_never_reaches_the_gui():
     for bad in (["evil"], 7, b"hub", {"h": 1}):
         g, link = _session()
+        rrc_client._dest = b"\x42" * 16
         rrc_client._state = rrc_client.CONNECTING
         rrc_client._on_packet(_env(P.T_WELCOME, body={P.B_WELCOME_HUB: bad}))
-        assert g.welcomed == [None], (bad, g.welcomed)
+        # _txt() rejects the hostile value; the header then falls back to
+        # the hub's own hash rather than None, which draw_rooms() would
+        # have read as "still connecting" on a live session.
+        assert len(g.welcomed) == 1, (bad, g.welcomed)
+        assert isinstance(g.welcomed[0], str), (bad, g.welcomed)
+        assert g.welcomed[0] == "42424242", (bad, g.welcomed)
     print("ok test_a_non_string_welcome_hub_name_never_reaches_the_gui")
 
 

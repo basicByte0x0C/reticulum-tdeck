@@ -263,6 +263,21 @@ def _clean_limits(limits):
 
 
 def _on_packet(data, packet=None):
+    """Link receive callback. Never raises.
+
+    urns calls this from OutgoingLink.receive() and swallows any exception
+    we let out, logging it where nothing on the device can see it
+    (link.py:1182-1186). That turns a bug in here into a silent stall --
+    the session simply never advances and the screen sits on its last
+    status forever. Surfacing it as a line in the scrollback costs
+    nothing and makes the failure legible on the device itself."""
+    try:
+        _dispatch(data)
+    except Exception as e:
+        _line("error", None, "!! rx: " + str(e))
+
+
+def _dispatch(data):
     """Inbound link packet -> one decoded envelope, dispatched by type.
 
     Structured fields only: every NOTICE the hub sends is rendered as
@@ -300,7 +315,20 @@ def _on_packet(data, packet=None):
         else:
             _hub_name = None
             _limits = {}
+        if not _hub_name:
+            # draw_rooms() keys off the hub name to decide whether the
+            # session is still coming up. A hub that omits B_WELCOME_HUB
+            # would otherwise leave the header reading "connecting..."
+            # forever over a session that is already up.
+            _hub_name = _dest.hex()[:8] if _dest else "rrc hub"
         _state = READY
+        # Clear the connect-phase progress text. connect() sets
+        # "waiting for WELCOME..." and then never calls _status() again:
+        # its wait loop exits because _state moved off CONNECTING and the
+        # function simply returns. Nothing else clears it, so the header
+        # kept rendering the first ten characters -- "waiting fo" -- over a
+        # live session, which is indistinguishable from a hung connect.
+        _status("")
         if _gui is not None:
             _gui.rrc_welcome(_hub_name)
         return

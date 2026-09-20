@@ -1210,6 +1210,46 @@ def test_a_non_string_room_from_a_hub_cannot_kill_the_draw_task():
     print("ok test_a_non_string_room_from_a_hub_cannot_kill_the_draw_task")
 
 
+def test_the_header_stops_reporting_the_connect_step_once_welcomed():
+    """The reported field failure: a live session showing "waiting fo".
+
+    connect() ends on _status("waiting for WELCOME...") and never calls
+    _status() again -- the wait loop exits because _state left CONNECTING
+    and the function returns. The header renders ui._rrc_status[:10] in its
+    right-hand corner, so a session that was linked, identified and
+    welcomed painted "waiting fo" for as long as it stayed open. Only the
+    UI and the client joined up show it: the client alone never draws, and
+    the UI alone is handed the status it is asked to assume.
+    """
+    import rrc_ui
+    g, link = _hub_driven_ui(state=rrc_client.CONNECTING)
+    rrc_client._status("waiting for WELCOME...")
+    _feed(P.T_WELCOME, body={P.B_WELCOME_HUB: "Varna Hub"})
+    assert rrc_client._state == rrc_client.READY
+    g.tft.calls = []
+    rrc_ui.draw_rooms(g)
+    painted = _painted(g.tft.calls)
+    assert "waiting" not in painted, painted
+    assert "Varna Hub" in painted, painted
+    print("ok test_the_header_stops_reporting_the_connect_step_once_welcomed")
+
+
+def test_the_header_gives_the_whole_row_to_the_status_before_welcome():
+    """Before WELCOME there is no hub name, so the status is all there is.
+
+    Squeezed into the ten-character right-hand corner it truncated to
+    "waiting fo", which names neither the step nor the failure.
+    """
+    import rrc_ui
+    g, link = _hub_driven_ui(state=rrc_client.CONNECTING)
+    rrc_client._status("waiting for WELCOME...")
+    g.tft.calls = []
+    rrc_ui.draw_rooms(g)
+    painted = _painted(g.tft.calls)
+    assert "waiting for WELCOME" in painted, painted
+    print("ok test_the_header_gives_the_whole_row_to_the_status_before_welcome")
+
+
 def test_a_non_string_welcome_hub_name_cannot_kill_the_draw_task():
     # _draw_header does left + "\x01" + right on the announced hub name.
     for bad in (["evil"], 7, b"hub"):
@@ -1220,7 +1260,12 @@ def test_a_non_string_welcome_hub_name_cannot_kill_the_draw_task():
         g.tft.calls = []
         rrc_ui.draw_rooms(g)                     # must not raise
         painted = _painted(g.tft.calls)
-        assert "connecting..." in painted, painted   # falls back, not blank
+        # _txt() drops the hostile value and the client falls back to the
+        # hub's own hash, so the header names the hub instead of going
+        # blank -- and never reads "connecting..." on a live session.
+        assert "42424242" in painted, painted
+        assert "connecting" not in painted, painted
+        assert "evil" not in painted, painted
     print("ok test_a_non_string_welcome_hub_name_cannot_kill_the_draw_task")
 
 

@@ -140,8 +140,15 @@ def _visible_lines(ui, rows):
 
 def draw_rooms(ui):
     """Hub console: the MOTD and any /list reply, verbatim."""
-    _draw_header(ui, ui._rrc_hub_name or "connecting...",
-                 ui._rrc_status[:10] if ui._rrc_status else "")
+    if ui._rrc_hub_name:
+        _draw_header(ui, ui._rrc_hub_name,
+                     ui._rrc_status[:10] if ui._rrc_status else "")
+    else:
+        # Before WELCOME there is no hub name, and the connect status is the
+        # only thing on this screen worth reading. Give it the whole row:
+        # squeezed into the right-hand corner it truncates to "waiting fo",
+        # which tells the user nothing and hides the failure from us too.
+        _draw_header(ui, ui._rrc_status or "connecting...", "")
     rows = BODY_ROWS - 1
     lines = _visible_lines(ui, rows)
     for i in range(rows):
