@@ -14,6 +14,7 @@ from ui import (UI, BODY_Y, CACHE_ROWS, CHAR_H, CHAR_W, COLS, INPUT_Y,
 # SCREEN_H and SEP_Y are unused here.
 
 import rrc_proto as _P      # constants only -- for the composer's fallback cap
+import time
 
 
 def open_hub(ui, dest):
@@ -102,13 +103,26 @@ def _wrap_line(kind, nick, text):
     the same distinction for the same reason.
 
     The wrapper is ui.UI._wrap_text -- the app's, not a second copy of it.
+
+    Newlines are split on BEFORE the character filter, not after: rrcd
+    answers /list and /who with ONE envelope whose body is "\n".join(lines)
+    (commands.py), and _ascii_keep_spacing() keeps 32..126 plus Cyrillic,
+    so a newline was dropped with nothing put in its place --
+    "#varna (3)\n#general (12)" rendered as "#varna (3)#general (12)".
+    The hub's room list arrived intact and was painted as an unreadable
+    run-on line. _wrap_text() has no newline handling of its own; it wraps
+    one paragraph. An empty paragraph yields one blank row, which keeps the
+    blank lines a hub puts between sections.
     """
     body = text
     if kind == "msg" and nick:
         body = nick + "> " + text
     elif kind == "action" and nick:
         body = "* " + nick + " " + text
-    return UI._wrap_text(_ascii_keep_spacing(body), COLS)
+    rows = []
+    for para in body.split("\n"):
+        rows.extend(UI._wrap_text(_ascii_keep_spacing(para), COLS))
+    return rows
 
 
 def _flatten(ui):
@@ -166,7 +180,7 @@ def _draw_footer(ui):
         ui.tft.text(ui.font, _pad("room> " + ui._rrc_input)[:COLS], 0, INPUT_Y,
                     ui.NEON_CYAN, ui.BG_DARK)
         return
-    hint = "(b)ack (j)oin  click=open"
+    hint = "(b)ack (j)oin (l)ist  click=open"
     ui.tft.text(ui.font, _pad(hint), 0, INPUT_Y, ui.DIM_CYAN, ui.BG_DARK)
 
 
@@ -224,6 +238,12 @@ def handle_key(ui, ch, key):
     if ui._rrc_prompt:
         return _handle_prompt_key(ui, ch, key)
     if ui.state == STATE_RRC_ROOMS:
+        if ch in (ord("l"), ord("L")):
+            # The list is requested once on WELCOME. This is for a hub whose
+            # reply was lost, or one whose rooms changed while we sat here.
+            if ui.on_rrc_list:
+                ui.on_rrc_list()
+            return True
         if ch in (ord("j"), ord("J")):
             ui._rrc_prompt = True
             ui._rrc_input = ""
@@ -250,16 +270,21 @@ def handle_key(ui, ch, key):
             if text and ui.on_rrc_say:
                 ui.on_rrc_say(text)
             return True
-        if ch == 8:
-            ui._rrc_input = ui._rrc_input[:-1]
-            ui.dirty = True
+        if ch == 8:                      # backspace: edit, or leave when empty
+            if ui._rrc_input:
+                ui._rrc_input = ui._rrc_input[:-1]
+                ui.dirty = True
+                return True
+            if _settled(ui):
+                # Empty composer + backspace parts the room, exactly as the
+                # esc branch below does -- which this keyboard cannot
+                # reach. The 500 ms guard is the app's (ui.py:2639, 2710):
+                # a phantom keyboard byte arriving on the state change must
+                # not bounce the user straight back out of the room.
+                _leave_room(ui)
             return True
         if ch == 27:                     # esc leaves the room, keeps the link
-            if ui.on_rrc_part:
-                ui.on_rrc_part()
-            ui.state = STATE_RRC_ROOMS
-            ui._rrc_panel = False
-            ui.dirty = True
+            _leave_room(ui)
             return True
         # The composer is capped on the session's real byte budget, never on
         # a column count: the protocol allows ~350 bytes against a 38-column
@@ -300,6 +325,26 @@ def _cap(ui):
     return _P.DEFAULT_MAX_BODY
 
 
+def _settled(ui):
+    """Has the current screen been up long enough to trust a keystroke?
+
+    The app's own guard (ui.py:2639, 2710): a state change can be followed
+    by a phantom byte from the keyboard controller, and a backspace that
+    means "go back" would act on it and bounce the user straight out of the
+    screen they just entered.
+    """
+    return time.ticks_diff(time.ticks_ms(), ui._state_change_ms) > 500
+
+
+def _leave_room(ui):
+    """Part the room, keep the hub link, return to the console."""
+    if ui.on_rrc_part:
+        ui.on_rrc_part()
+    ui.state = STATE_RRC_ROOMS
+    ui._rrc_panel = False
+    ui.dirty = True
+
+
 def _handle_prompt_key(ui, ch, key):
     if ch == 13:                     # enter
         text = ui._rrc_input.strip()
@@ -310,8 +355,17 @@ def _handle_prompt_key(ui, ch, key):
             room, _, room_key = text.partition(" ")
             ui.on_rrc_join(room, room_key.strip() or None)
         return True
-    if ch == 8:                      # backspace
-        ui._rrc_input = ui._rrc_input[:-1]
+    if ch == 8:                      # backspace: edit, or leave when empty
+        if ui._rrc_input:
+            ui._rrc_input = ui._rrc_input[:-1]
+        else:
+            # Empty input + backspace = cancel, the idiom every other
+            # screen in this app uses (ui.py:2635-2641, 2706-2712). The
+            # esc branch below is the only other way out of this prompt
+            # and the T-Deck keyboard never emits esc -- ui.py:2640 says
+            # so in as many words -- so without this the prompt was a
+            # dead end: nothing typed, nothing sent, no way back.
+            ui._rrc_prompt = False
         ui.dirty = True
         return True
     if ch == 27:                     # esc

@@ -173,6 +173,88 @@ def test_j_opens_the_room_name_prompt():
     print("ok test_j_opens_the_room_name_prompt")
 
 
+def test_backspace_edits_the_prompt_then_leaves_it():
+    """The room prompt was a dead end on this hardware.
+
+    Its only exit was ch == 27, and the T-Deck keyboard never emits esc --
+    ui.py:2640 states that outright, which is why every other screen in the
+    app leaves on "empty input + backspace" (ui.py:2635-2641, 2706-2712).
+    Open the prompt with no room name in mind and you were stuck in it.
+    """
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    import rrc_ui
+    rrc_ui.handle_key(g, ord("j"), b"j")
+    for ch in "ab":
+        rrc_ui.handle_key(g, ord(ch), ch.encode())
+    rrc_ui.handle_key(g, 8, b"\x08")          # edits first
+    assert g._rrc_input == "a", g._rrc_input
+    assert g._rrc_prompt is True
+    rrc_ui.handle_key(g, 8, b"\x08")          # empties it
+    assert g._rrc_input == ""
+    assert g._rrc_prompt is True
+    rrc_ui.handle_key(g, 8, b"\x08")          # now it leaves
+    assert g._rrc_prompt is False, "backspace on an empty prompt must cancel"
+    print("ok test_backspace_edits_the_prompt_then_leaves_it")
+
+
+def test_backspace_on_an_empty_composer_parts_the_room():
+    """Same dead end one screen deeper: no esc key means no way out."""
+    import rrc_ui
+    g, link = _hub_driven_ui()
+    parted = []
+    g.on_rrc_part = lambda: parted.append(True)
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_input = "hi"
+    g._state_change_ms = 0            # older than the 500 ms settle guard
+    rrc_ui.handle_key(g, 8, b"\x08")
+    assert g._rrc_input == "h", g._rrc_input
+    assert parted == [], "a non-empty composer must only edit"
+    rrc_ui.handle_key(g, 8, b"\x08")
+    assert g._rrc_input == ""
+    assert parted == [], "emptying the composer must not part"
+    rrc_ui.handle_key(g, 8, b"\x08")
+    assert parted == [True], "backspace on an empty composer must part"
+    assert g.state == U.STATE_RRC_ROOMS, g.state
+    print("ok test_backspace_on_an_empty_composer_parts_the_room")
+
+
+def test_a_phantom_backspace_on_arrival_does_not_part_the_room():
+    """The app's 500 ms guard, applied to the new leave path.
+
+    rrc_joined() switches the screen; the keyboard controller can deliver a
+    stray byte across that switch, and without the guard it would part the
+    room in the same instant it was joined.
+    """
+    import rrc_ui, time
+    g, link = _hub_driven_ui()
+    parted = []
+    g.on_rrc_part = lambda: parted.append(True)
+    g.rrc_joined("#varna")                     # stamps _state_change_ms
+    assert g.state == U.STATE_RRC_CHAT
+    g._rrc_input = ""
+    rrc_ui.handle_key(g, 8, b"\x08")
+    assert parted == [], "a backspace within 500 ms of arrival must be ignored"
+    assert g.state == U.STATE_RRC_CHAT, g.state
+    print("ok test_a_phantom_backspace_on_arrival_does_not_part_the_room")
+
+
+def test_multiline_hub_prose_keeps_one_row_per_line():
+    """rrcd sends /list as ONE envelope: "\n".join(lines).
+
+    _ascii_keep_spacing() keeps 32..126 plus Cyrillic, so the newline was
+    dropped with nothing put in its place and the hub's room list painted
+    as a single run-on row -- the list arrived intact and was unreadable.
+    """
+    import rrc_ui
+    rows = rrc_ui._wrap_line("notice", None, "#varna (3)\n#general (12)")
+    assert rows == ["#varna (3)", "#general (12)"], rows
+    # A blank line between sections survives as a blank row.
+    rows = rrc_ui._wrap_line("notice", None, "Rooms:\n\n#varna")
+    assert rows == ["Rooms:", "", "#varna"], rows
+    print("ok test_multiline_hub_prose_keeps_one_row_per_line")
+
+
 def test_prompt_enter_joins_the_typed_room():
     g = make_ui()
     g.state = U.STATE_RRC_ROOMS
@@ -397,14 +479,24 @@ def test_empty_enter_does_not_send():
     print("ok test_empty_enter_does_not_send")
 
 
-def test_backspace_on_empty_input_is_a_noop():
+def test_backspace_on_empty_input_never_slices_past_the_start():
+    """Renamed: this no longer asserts a noop.
+
+    Backspace on an empty composer now parts the room (the T-Deck has no
+    esc key, so it is the only way out) -- see
+    test_backspace_on_an_empty_composer_parts_the_room. What survives from
+    the original is the narrower guarantee this test was written for: the
+    key must not raise and must not slice the string past its start. The
+    old name outlived the behaviour and would have read as a licence to
+    put the dead end back.
+    """
     g = make_ui()
     g.state = U.STATE_RRC_CHAT
     g._rrc_room = "#varna"
     import rrc_ui
     rrc_ui.handle_key(g, 8, b"\x08")   # must not raise or go negative
     assert g._rrc_input == ""
-    print("ok test_backspace_on_empty_input_is_a_noop")
+    print("ok test_backspace_on_empty_input_never_slices_past_the_start")
 
 
 def test_back_parts_the_room_and_returns_to_the_console():

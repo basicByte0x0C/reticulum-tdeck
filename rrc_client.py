@@ -331,6 +331,12 @@ def _dispatch(data):
         _status("")
         if _gui is not None:
             _gui.rrc_welcome(_hub_name)
+        # The console's whole job is showing what this hub offers, and the
+        # hub volunteers nothing beyond an optional MOTD -- this one sent
+        # no greeting at all, leaving a blank screen that read as a hang.
+        # One small MSG buys the room list; replying to PING from in here
+        # is the same pattern.
+        list_rooms()
         return
 
     if t == P.T_JOINED:
@@ -456,6 +462,26 @@ def mention_for(identity_hash):
         if same == 1:
             return "@" + nick
     return "@" + src.hex()[:8]
+
+
+def list_rooms():
+    """Ask the hub which rooms it has.
+
+    /list is the one rrcd command that needs neither a room nor
+    authorisation (commands.py), which is what makes it usable from the
+    console -- where there is no composer to type a command into. Without
+    this nothing ever requested the list, so the console stayed empty and
+    the (j)oin prompt asked for a room name the UI gave no way to learn.
+
+    The reply is a single NOTICE whose body is "\n".join(lines). rrcd
+    applies no size guard to it, so on a hub with many rooms the send can
+    exceed the link MDU and fail hub-side -- we would simply receive
+    nothing. That is the same trap /who has; it is the hub's to fix.
+    """
+    if _state not in (READY, JOINED) or _link is None:
+        return False
+    return _send_env(P.make_envelope(P.T_MSG, src=_my_identity.hash,
+                                     body="/list", nick=_nick()))
 
 
 def say(text):

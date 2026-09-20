@@ -350,6 +350,43 @@ def test_welcome_without_a_hub_name_still_names_the_header():
     print("ok test_welcome_without_a_hub_name_still_names_the_header")
 
 
+def test_welcome_asks_the_hub_for_its_room_list():
+    """The console had no way to ever show a room list.
+
+    Nothing sent /list, and STATE_RRC_ROOMS has no composer to type one
+    into -- so the console sat empty and the (j)oin prompt asked for a room
+    name the UI gave no way to discover. The hub volunteers nothing beyond
+    an optional MOTD, and the hub under test sent none at all.
+    """
+    g, link = _session()
+    link.sent = []
+    rrc_client._state = rrc_client.CONNECTING
+    rrc_client._on_packet(_env(P.T_WELCOME, body={P.B_WELCOME_HUB: "Varna Hub"}))
+    assert rrc_client._state == rrc_client.READY
+    assert len(link.sent) == 1, link.sent
+    env = C.loads(link.sent[0])
+    assert env[P.K_T] == P.T_MSG, env
+    assert env[P.K_BODY] == "/list", env
+    print("ok test_welcome_asks_the_hub_for_its_room_list")
+
+
+def test_list_rooms_needs_no_room_and_is_refused_before_welcome():
+    """/list is the one rrcd command needing neither room nor auth, which
+    is what makes it usable from the console. It still needs a session:
+    before WELCOME there is no link to send it on."""
+    g, link = _session()
+    rrc_client._state = rrc_client.CONNECTING
+    link.sent = []
+    assert rrc_client.list_rooms() is False
+    assert link.sent == [], link.sent
+    rrc_client._state = rrc_client.READY
+    assert rrc_client.list_rooms() is True
+    env = C.loads(link.sent[0])
+    assert env[P.K_BODY] == "/list"
+    assert env.get(P.K_ROOM) is None, env      # no room context needed
+    print("ok test_list_rooms_needs_no_room_and_is_refused_before_welcome")
+
+
 def test_resource_envelope_is_ignored_quietly():
     g, link = _session()
     before = len(g.lines)

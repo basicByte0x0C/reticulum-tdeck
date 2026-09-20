@@ -657,6 +657,7 @@ class UI:
         self.on_rrc_join = None         # (room, key) -> None
         self.on_rrc_say = None          # (text) -> None
         self.on_rrc_part = None         # () -> None
+        self.on_rrc_list = None         # () -> None — re-request /list
         self.on_rrc_disconnect = None   # () -> None
         self.on_rrc_seed = None         # () -> None
         self.on_rrc_mention = None      # (identity_hash) -> "@token" string
@@ -2209,11 +2210,17 @@ class UI:
     def rrc_joined(self, room):
         self._rrc_room = room
         self.state = STATE_RRC_CHAT
+        # Stamped like every other state change (see _state_change_ms uses):
+        # rrc_ui's "empty composer + backspace parts the room" reads this to
+        # ignore a phantom keyboard byte arriving on the switch, which would
+        # otherwise part the room the instant it was joined.
+        self._state_change_ms = time.ticks_ms()
         self.dirty = True
 
     def rrc_welcome(self, hub_name):
         self._rrc_hub_name = hub_name
         self.state = STATE_RRC_ROOMS
+        self._state_change_ms = time.ticks_ms()
         self.dirty = True
 
     def rrc_closed(self):
