@@ -173,6 +173,21 @@ def test_j_opens_the_room_name_prompt():
     print("ok test_j_opens_the_room_name_prompt")
 
 
+def test_backspace_closes_the_member_panel():
+    """The panel swallows every key it does not handle, so backspace did
+    nothing there -- indistinguishable from a stuck overlay. alt+w and a
+    trackball click already closed it; backspace is the app's universal
+    back and now does too."""
+    import rrc_ui
+    g, link = _hub_driven_ui()
+    g.state = U.STATE_RRC_CHAT
+    rrc_ui.handle_key(g, rrc_ui._ALT_W, bytes([rrc_ui._ALT_W]))
+    assert g._rrc_panel is True
+    rrc_ui.handle_key(g, 8, b"\x08")
+    assert g._rrc_panel is False, "backspace must close the member panel"
+    print("ok test_backspace_closes_the_member_panel")
+
+
 def test_backspace_edits_the_prompt_then_leaves_it():
     """The room prompt was a dead end on this hardware.
 

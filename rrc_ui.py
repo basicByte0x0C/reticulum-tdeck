@@ -229,7 +229,13 @@ def handle_key(ui, ch, key):
             ui.dirty = True
             return True
         if ui._rrc_panel:
-            if ch == 27:
+            # alt+w above toggles it shut, and a trackball click mentions
+            # and closes. Backspace joins them because it is this app's
+            # universal "back" and the panel swallows every other key --
+            # pressing it here did nothing at all, which reads as a stuck
+            # overlay. esc is kept for completeness; this keyboard does not
+            # send it (ui.py:2640).
+            if ch == 27 or ch == 8:
                 ui._rrc_panel = False
                 _invalidate_rows(ui)
                 ui.dirty = True
