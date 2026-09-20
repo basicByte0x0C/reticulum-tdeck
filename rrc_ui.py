@@ -41,8 +41,14 @@ def open_hub(ui, dest):
     ui._rrc_input = ""
     ui._rrc_prompt = False
     ui._rrc_panel = False
+    ui._rrc_panel_kind = "members"
     ui._rrc_panel_idx = 0
     ui._rrc_panel_scroll = 0
+    # Hub B must not inherit hub A's rooms, and _rrc_list_seen has to go
+    # back with them or the picker would never ask this hub for its own.
+    ui._rrc_rooms = []
+    ui._rrc_list_seen = False
+    ui._rrc_list_ms = 0
     _invalidate_rows(ui)
     ui.state = STATE_RRC_ROOMS
     if ui.on_rrc_connect:
@@ -172,6 +178,8 @@ def draw_rooms(ui):
             ui._draw_row_cached(i + 2, _pad(text), y, _line_color(ui, kind))
         else:
             ui._draw_row_cached(i + 2, "", y, ui.NEON_CYAN)
+    if ui._rrc_panel:
+        draw_panel(ui)
     _draw_footer(ui)
 
 
@@ -180,27 +188,29 @@ def _draw_footer(ui):
         ui.tft.text(ui.font, _pad("room> " + ui._rrc_input)[:COLS], 0, INPUT_Y,
                     ui.NEON_CYAN, ui.BG_DARK)
         return
-    hint = "(b)ack (j)oin (l)ist  click=open"
+    # No letter keys left: the picker owns the room list and joining by
+    # name, and backspace owns the exit. One gesture, one key, both named.
+    hint = "bksp=exit  click=rooms"
     ui.tft.text(ui.font, _pad(hint), 0, INPUT_Y, ui.DIM_CYAN, ui.BG_DARK)
 
 
-# alt+w, as the keyboard actually delivers it.
+# There is no modifier key on this hardware, and that is settled, not
+# assumed. LilyGO publishes the v1 keyboard's firmware source
+# (examples/Keyboard_ESP32C3/Keyboard_ESP32C3.ino): an ESP32-C3 scans the
+# matrix, resolves the layer ITSELF and hands the host one already-resolved
+# ASCII byte -- board_tdeck_v1.get_key() is `i2c.readfrom(KBD_ADDR, 1)`,
+# exactly one byte, and the Pro keeps that contract. Its printMatrix()
+# consults the Sym key alone when choosing between the two character maps;
+# ALT is read in precisely two hardcoded combos, Alt+B (backlight, sends
+# nothing) and Alt+C (0x0C). So alt+w never becomes a byte of its own: it
+# arrives as a plain 'w'.
 #
-# The evidence in this repo, not a guess: board_tdeck_v1.get_key() is
-# `i2c.readfrom(KBD_ADDR, 1)` -- exactly ONE byte per keystroke -- and
-# board_tdeck_pro.get_key() keeps that contract, while ui.kbd_loop() calls
-# handle_key(key) once per byte. So a two-byte b"\x1bw" comparison can never
-# be true on either board. The v1's ESP32-C3 keyboard puts its alt/sym layer
-# on the control codes: README.md documents Sym/Alt+c/d/z as Ctrl-C/D/Z, and
-# ui._handle_key_shell() forwards "control bytes straight from the keyboard
-# (Ctrl-C=0x03, Ctrl-D=0x04, Ctrl-Z=0x1a, ...)" one byte at a time. alt+w is
-# therefore Ctrl-W, 0x17.
-#
-# The esc-prefixed form is kept as a harmless alternative in case a keyboard
-# firmware reports the layer that way; the device boot-test says which path
-# actually fires. (README also notes the exact Sym/Alt codes depend on the
-# keyboard firmware revision.)
-_ALT_W = 0x17
+# Sym is no better here. It IS a layer, but its layer is the digits and
+# punctuation, which have no other key on this board -- Sym+w is the only
+# way to type "1". Binding it would take a character away from the
+# composer. The trackball click carries the panels instead (ui.py, the
+# click block in handle_trackball), which is also how the shell tab solved
+# the same wall.
 
 
 def _invalidate_rows(ui):
@@ -217,45 +227,29 @@ def _invalidate_rows(ui):
 
 
 def handle_key(ui, ch, key):
-    if ui.state == STATE_RRC_CHAT:
-        # alt+w toggles the member panel. A bare (w) cannot: every letter
-        # key belongs to the composer, and enter sends it. See _ALT_W above
-        # for how the keyboard encodes it.
-        if ch == _ALT_W or key == b"\x1bw" or key == b"\x1bW":
-            ui._rrc_panel = not ui._rrc_panel
-            ui._rrc_panel_idx = 0
-            ui._rrc_panel_scroll = 0
-            _invalidate_rows(ui)
-            ui.dirty = True
+    # Either panel holds focus for as long as it is up, in both states.
+    # A trackball click acts on the highlighted row and closes; backspace
+    # joins it because it is this app's universal "back" and the panel
+    # swallows every other key -- pressing it here did nothing at all,
+    # which reads as a stuck overlay. esc is kept for completeness; this
+    # keyboard does not send it (ui.py:2640).
+    if ui._rrc_panel:
+        if ch == 27 or ch == 8:
+            panel_close(ui)
             return True
-        if ui._rrc_panel:
-            # alt+w above toggles it shut, and a trackball click mentions
-            # and closes. Backspace joins them because it is this app's
-            # universal "back" and the panel swallows every other key --
-            # pressing it here did nothing at all, which reads as a stuck
-            # overlay. esc is kept for completeness; this keyboard does not
-            # send it (ui.py:2640).
-            if ch == 27 or ch == 8:
-                ui._rrc_panel = False
-                _invalidate_rows(ui)
-                ui.dirty = True
-                return True
-            return True          # panel holds focus; keys do not compose
+        return True              # panel holds focus; keys do not compose
     if ui._rrc_prompt:
         return _handle_prompt_key(ui, ch, key)
     if ui.state == STATE_RRC_ROOMS:
-        if ch in (ord("l"), ord("L")):
-            # The list is requested once on WELCOME. This is for a hub whose
-            # reply was lost, or one whose rooms changed while we sat here.
-            if ui.on_rrc_list:
-                ui.on_rrc_list()
-            return True
-        if ch in (ord("j"), ord("J")):
-            ui._rrc_prompt = True
-            ui._rrc_input = ""
-            ui.dirty = True
-            return True
-        if ch in (ord("b"), ord("B")):
+        # Backspace is the only key this screen binds, and every letter is
+        # free again. (l) is gone because opening the picker refreshes the
+        # list, and (b) because backspace is this app's universal "back"
+        # (ui.py:2635-2641) and there is no text field here to want it.
+        # _settled() guards the same phantom keystroke the room's exit does:
+        # without it a stray byte on arrival tears the hub link straight
+        # back down. esc is kept for completeness; this keyboard does not
+        # send it (ui.py:2640).
+        if (ch == 8 or ch == 27) and _settled(ui):
             if ui.on_rrc_disconnect:
                 ui.on_rrc_disconnect()
             ui.state = STATE_NODES
@@ -269,24 +263,20 @@ def handle_key(ui, ch, key):
             if text.lower() == "/who":
                 # Open the member panel instead of sending this to the hub.
                 #
-                # alt+w is the documented way in, and on the v1 keyboard it
-                # is not reachable: README.md says the Sym/Alt control-key
-                # codes depend on the keyboard firmware revision, and this
-                # device emits a plain 'w'. A typed command needs no
-                # modifier, so it works on every board and every revision.
-                #
                 # Not sending it loses nothing. rrcd answers /who in ONE
                 # unchunked envelope and applies no size guard, so past
                 # roughly thirteen members the reply exceeds the link MDU,
                 # fails hub-side and the client receives nothing at all --
                 # which is why the roster is built from JOINED/PARTED in the
-                # first place. The panel shows that roster, so it is both
-                # reachable and more accurate than the hub's answer.
-                ui._rrc_panel = not ui._rrc_panel
-                ui._rrc_panel_idx = 0
-                ui._rrc_panel_scroll = 0
-                _invalidate_rows(ui)
-                ui.dirty = True
+                # first place. The panel shows that roster, so it is more
+                # accurate than the hub's own answer.
+                #
+                # The trackball click opens the same panel. This stays
+                # because it costs one comparison and a composer is already
+                # open here: someone mid-sentence can ask without reaching
+                # for the ball. The match is exact, so /whois still goes to
+                # the hub.
+                panel_toggle(ui, "members")
                 return True
             # Sending returns the view to the live tail. rrc_line() holds a
             # reader's anchor against arriving traffic, so without this a
@@ -448,6 +438,103 @@ _PANEL_HASH_X = PANEL_X + PANEL_W - 8 - 10 * CHAR_W
 # Pro's 240px panel a 20-character name ran to x=176 over a hash column
 # starting at x=144.
 _PANEL_NAME_COLS = max(1, (_PANEL_HASH_X - _PANEL_TEXT_X) // CHAR_W - 1)
+# A room row carries no [hash8], so it gets the whole interior: 36 columns
+# on the v1 against a member's 25. Derived the same way _PANEL_NAME_COLS is,
+# so the Pro's narrower panel shrinks all three together rather than
+# overrunning the frame.
+_PANEL_FULL_COLS = max(1, (PANEL_X + PANEL_W - 8 - _PANEL_TEXT_X) // CHAR_W)
+_PANEL_TOPIC_X = _PANEL_TEXT_X + 14 * CHAR_W
+_PANEL_ROOM_COLS = max(1, (_PANEL_TOPIC_X - _PANEL_TEXT_X) // CHAR_W - 1)
+_PANEL_TOPIC_COLS = max(1, (PANEL_X + PANEL_W - 8 - _PANEL_TOPIC_X) // CHAR_W)
+
+
+JOIN_ROW = "+ join by name..."
+
+
+def _room_rows(ui):
+    """Rows for the picker: the action row, then whatever /list returned.
+
+    The action row is always present and always first, because it is the
+    only way to reach a room /list never names -- an on-demand room, a +k
+    room needing a key, or one that does not exist yet. On a hub that
+    registers nothing (FR-rrc-client.md: "a hub whose rooms are all
+    on-demand lists nothing") it is the only row there is, which is why
+    the empty picker is something to click rather than a sign.
+    """
+    return [None] + list(ui._rrc_rooms)
+
+
+def _panel_len(ui):
+    """How many rows the open panel has, whichever kind it is."""
+    if ui._rrc_panel_kind == "rooms":
+        return len(_room_rows(ui))
+    return len(ui._rrc_roster)
+
+
+def _panel_chrome(ui, title, count):
+    """Box, 2px frame, title band and rule -- identical for both panels.
+
+    Every string drawn here goes through ui._tb(): the room name is
+    hub-controlled (K_ROOM) and a kept Cyrillic char must take the
+    glyph-index path, same as the Task 8 header fix. The static labels are
+    wrapped too, for consistency, though they are only ever ASCII.
+    """
+    ui.tft.fill_rect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, ui.BG_DARK)
+    for i in range(2):               # 2px frame
+        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + i, PANEL_W - 2 * i, 1, ui.NEON_CYAN)
+        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + PANEL_H - 1 - i,
+                         PANEL_W - 2 * i, 1, ui.NEON_CYAN)
+        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + i, 1, PANEL_H - 2 * i, ui.NEON_CYAN)
+        ui.tft.fill_rect(PANEL_X + PANEL_W - 1 - i, PANEL_Y + i, 1,
+                         PANEL_H - 2 * i, ui.NEON_CYAN)
+
+    ui.tft.fill_rect(PANEL_X + 2, PANEL_Y + 2, PANEL_W - 4, 18, ui.SEL_BG)
+    ui.tft.text(ui.font, ui._tb(_ascii(title)[:14]), _PANEL_TEXT_X,
+                PANEL_Y + 3, ui.YELLOW, ui.SEL_BG)
+    ui.tft.text(ui.font, ui._tb(count), PANEL_X + PANEL_W - 8 - len(count) * CHAR_W,
+                PANEL_Y + 3, ui.DIM_CYAN, ui.SEL_BG)
+    ui.tft.fill_rect(PANEL_X + 2, PANEL_Y + 20, PANEL_W - 4, 1, ui.DIM_CYAN)
+
+
+def _panel_row_bg(ui, y, selected):
+    """Paint a row's selection fill and accent bar; return its background."""
+    if selected:
+        ui.tft.fill_rect(PANEL_X + 2, y, PANEL_W - 4 - 6, CHAR_H, ui.SEL_BG)
+        ui.tft.fill_rect(PANEL_X + 2, y, 3, CHAR_H, ui.NEON_MAG)
+    return ui.SEL_BG if selected else ui.BG_DARK
+
+
+def _panel_scrollbar(ui, total):
+    track_y = PANEL_Y + 22
+    track_h = PANEL_ROWS * CHAR_H
+    ui.tft.fill_rect(PANEL_X + PANEL_W - 6, track_y, 4, track_h, ui.BG_DARK)
+    if total > PANEL_ROWS:
+        bar_h = max(6, track_h * PANEL_ROWS // total)
+        bar_y = track_y + track_h * ui._rrc_panel_scroll // total
+        ui.tft.fill_rect(PANEL_X + PANEL_W - 6, bar_y, 4, bar_h, ui.NEON_CYAN)
+
+
+def _panel_foot(ui, hint):
+    """Footer band: how to leave on the left, what a click does on the right.
+
+    "bksp close" and not "alt+w close": alt+w cannot be pressed on this
+    hardware (see the note above handle_key), so naming it here was an
+    instruction to press a key that does nothing.
+    """
+    foot_y = PANEL_Y + PANEL_H - 22
+    ui.tft.fill_rect(PANEL_X + 2, foot_y, PANEL_W - 4, 20, ui.SEL_BG)
+    ui.tft.text(ui.font, ui._tb("bksp close"), _PANEL_TEXT_X, foot_y + 2,
+                ui.NEON_GREEN, ui.SEL_BG)
+    ui.tft.text(ui.font, ui._tb(hint), PANEL_X + PANEL_W - 8 - len(hint) * CHAR_W,
+                foot_y + 2, ui.DIM_CYAN, ui.SEL_BG)
+
+
+def draw_panel(ui):
+    """Draw whichever panel is open."""
+    if ui._rrc_panel_kind == "rooms":
+        draw_rooms_panel(ui)
+    else:
+        draw_member_panel(ui)
 
 
 def draw_member_panel(ui):
@@ -459,28 +546,7 @@ def draw_member_panel(ui):
     inventing data the protocol does not carry.
     """
     roster = ui._rrc_roster
-    ui.tft.fill_rect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, ui.BG_DARK)
-    for i in range(2):               # 2px frame
-        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + i, PANEL_W - 2 * i, 1, ui.NEON_CYAN)
-        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + PANEL_H - 1 - i,
-                         PANEL_W - 2 * i, 1, ui.NEON_CYAN)
-        ui.tft.fill_rect(PANEL_X + i, PANEL_Y + i, 1, PANEL_H - 2 * i, ui.NEON_CYAN)
-        ui.tft.fill_rect(PANEL_X + PANEL_W - 1 - i, PANEL_Y + i, 1,
-                         PANEL_H - 2 * i, ui.NEON_CYAN)
-
-    ui.tft.fill_rect(PANEL_X + 2, PANEL_Y + 2, PANEL_W - 4, 18, ui.SEL_BG)
-    # Every string this panel draws goes through ui._tb() -- room name and
-    # nicks are hub-controlled (K_ROOM / K_NICK) and a kept Cyrillic char
-    # must take the glyph-index path, same as the Task 8 header fix; the
-    # static labels are wrapped too, for consistency, even though they are
-    # only ever ASCII. The [hash8] column below is the one deliberate
-    # exception -- see its comment.
-    ui.tft.text(ui.font, ui._tb(_ascii(_hashed(ui._rrc_room))[:14]), _PANEL_TEXT_X,
-                PANEL_Y + 3, ui.YELLOW, ui.SEL_BG)
-    count = "%d users" % len(roster)
-    ui.tft.text(ui.font, ui._tb(count), PANEL_X + PANEL_W - 8 - len(count) * CHAR_W,
-                PANEL_Y + 3, ui.DIM_CYAN, ui.SEL_BG)
-    ui.tft.fill_rect(PANEL_X + 2, PANEL_Y + 20, PANEL_W - 4, 1, ui.DIM_CYAN)
+    _panel_chrome(ui, _hashed(ui._rrc_room), "%d users" % len(roster))
 
     top = ui._rrc_panel_scroll
     for i in range(PANEL_ROWS):
@@ -490,10 +556,7 @@ def draw_member_panel(ui):
             break
         src, nick = roster[idx]
         selected = (idx == ui._rrc_panel_idx)
-        if selected:
-            ui.tft.fill_rect(PANEL_X + 2, y, PANEL_W - 4 - 6, CHAR_H, ui.SEL_BG)
-            ui.tft.fill_rect(PANEL_X + 2, y, 3, CHAR_H, ui.NEON_MAG)
-        bg = ui.SEL_BG if selected else ui.BG_DARK
+        bg = _panel_row_bg(ui, y, selected)
         # A member who has never spoken is known only by hash -- the app's
         # existing convention for an unknown name is "?".
         name = _ascii(nick) if nick else "?"
@@ -505,25 +568,137 @@ def draw_member_panel(ui):
         ui.tft.text(ui.font, "[" + src.hex()[:8] + "]", _PANEL_HASH_X, y,
                     ui.DIM_CYAN, bg)
 
-    track_y = PANEL_Y + 22
-    track_h = PANEL_ROWS * CHAR_H
-    ui.tft.fill_rect(PANEL_X + PANEL_W - 6, track_y, 4, track_h, ui.BG_DARK)
-    if len(roster) > PANEL_ROWS:
-        bar_h = max(6, track_h * PANEL_ROWS // len(roster))
-        bar_y = track_y + track_h * top // len(roster)
-        ui.tft.fill_rect(PANEL_X + PANEL_W - 6, bar_y, 4, bar_h, ui.NEON_CYAN)
+    _panel_scrollbar(ui, len(roster))
+    _panel_foot(ui, "click = mention")
 
-    foot_y = PANEL_Y + PANEL_H - 22
-    ui.tft.fill_rect(PANEL_X + 2, foot_y, PANEL_W - 4, 20, ui.SEL_BG)
-    ui.tft.text(ui.font, ui._tb("alt+w close"), _PANEL_TEXT_X, foot_y + 2,
-                ui.NEON_GREEN, ui.SEL_BG)
-    hint = "click = mention"
-    ui.tft.text(ui.font, ui._tb(hint), PANEL_X + PANEL_W - 8 - len(hint) * CHAR_W,
-                foot_y + 2, ui.DIM_CYAN, ui.SEL_BG)
+
+def draw_rooms_panel(ui):
+    """The room picker: the join-by-name action, then the hub's /list rooms.
+
+    A room row needs no [hash8] column, so a name gets the wider
+    _PANEL_ROOM_COLS and the topic fills the rest of the width. Names are
+    stored bare and shown "#name", exactly like every other room name on
+    screen -- rrc_client.join() owns the strip on the way out.
+    """
+    rows = _room_rows(ui)
+    listed = len(rows) - 1
+    _panel_chrome(ui, "#rooms", "%d rooms" % listed)
+
+    top = ui._rrc_panel_scroll
+    for i in range(PANEL_ROWS):
+        y = PANEL_Y + 22 + i * CHAR_H
+        idx = top + i
+        if idx >= len(rows):
+            break
+        row = rows[idx]
+        selected = (idx == ui._rrc_panel_idx)
+        bg = _panel_row_bg(ui, y, selected)
+        if row is None:
+            # The action row spans the full width: it carries no topic, and
+            # its label is longer than a room name column.
+            ui.tft.text(ui.font, ui._tb(JOIN_ROW[:_PANEL_FULL_COLS]),
+                        _PANEL_TEXT_X, y,
+                        ui.YELLOW if selected else ui.NEON_GREEN, bg)
+            continue
+        name, topic = row
+        ui.tft.text(ui.font, ui._tb(_ascii(_hashed(name))[:_PANEL_ROOM_COLS]),
+                    _PANEL_TEXT_X, y,
+                    ui.YELLOW if selected else ui.NEON_CYAN, bg)
+        if topic:
+            ui.tft.text(ui.font, ui._tb(_ascii(topic)[:_PANEL_TOPIC_COLS]),
+                        _PANEL_TOPIC_X, y, ui.DIM_CYAN, bg)
+
+    if not listed:
+        # Say why the picker is empty, and separate the two reasons: no
+        # answer yet is worth waiting on, an empty answer is not. A hub
+        # with no registered public rooms is healthy, not broken, so that
+        # second line is a statement of fact under an action row that still
+        # works -- not an error.
+        msg = "hub lists no public rooms" if ui._rrc_list_seen else "asking hub..."
+        ui.tft.text(ui.font, ui._tb(msg),
+                    _PANEL_TEXT_X, PANEL_Y + 22 + CHAR_H, ui.DIM_CYAN, ui.BG_DARK)
+
+    _panel_scrollbar(ui, len(rows))
+    _panel_foot(ui, "click = join")
+
+
+def panel_toggle(ui, kind):
+    """Open the panel of this kind, or close it if it is already showing.
+
+    The cursor opens where the common action is: on the first real room
+    when the hub listed any, on the action row when it listed none, so
+    either case is reached in one click rather than a click and a roll.
+    """
+    if ui._rrc_panel and ui._rrc_panel_kind == kind:
+        panel_close(ui)
+        return
+    ui._rrc_panel = True
+    ui._rrc_panel_kind = kind
+    ui._rrc_panel_scroll = 0
+    ui._rrc_panel_idx = 1 if (kind == "rooms" and ui._rrc_rooms) else 0
+    if kind == "rooms":
+        _refresh_rooms(ui)
+    _invalidate_rows(ui)
+    ui.dirty = True
+
+
+LIST_REFRESH_MS = 10000
+
+
+def _refresh_rooms(ui):
+    """Ask the hub for a current room list, at most once every 10 s.
+
+    The picker IS the room list, so opening it asks what the hub has now
+    rather than showing the snapshot WELCOME fetched -- that refresh is the
+    one thing (l) did that the gesture did not, and losing it would leave a
+    hub whose rooms changed mid-session stale with no way to re-ask.
+
+    Throttled because opening and shutting the panel is one gesture
+    repeated and rrcd allows 240 msgs/minute. Nothing waits on the reply:
+    the cached rows draw immediately and rrc_rooms() swaps them under the
+    open panel when a fresher answer lands, so a throttled open costs the
+    reader nothing.
+    """
+    if not ui.on_rrc_list:
+        return
+    now = time.ticks_ms()
+    if ui._rrc_list_ms and time.ticks_diff(now, ui._rrc_list_ms) < LIST_REFRESH_MS:
+        return
+    ui._rrc_list_ms = now
+    ui.on_rrc_list()
+
+
+def panel_close(ui):
+    ui._rrc_panel = False
+    _invalidate_rows(ui)
+    ui.dirty = True
+
+
+def panel_clamp(ui):
+    """Re-clamp the selection after the open panel's row list changed.
+
+    Same job rrc_members() does for the roster: a /list reply that arrives
+    while the picker is open can shorten it under the cursor, and the next
+    draw would index past the end.
+    """
+    n = _panel_len(ui)
+    if n <= 0:
+        ui._rrc_panel_idx = 0
+        ui._rrc_panel_scroll = 0
+        return
+    if ui._rrc_panel_idx >= n:
+        ui._rrc_panel_idx = n - 1
+    max_scroll = max(0, n - PANEL_ROWS)
+    if ui._rrc_panel_scroll > max_scroll:
+        ui._rrc_panel_scroll = max_scroll
+    if ui._rrc_panel_idx < ui._rrc_panel_scroll:
+        ui._rrc_panel_scroll = ui._rrc_panel_idx
 
 
 def panel_click(ui):
-    """Trackball click in the panel: insert the mention, close the panel."""
+    """Trackball click on the highlighted row: act on it, close the panel."""
+    if ui._rrc_panel_kind == "rooms":
+        return _rooms_panel_click(ui)
     roster = ui._rrc_roster
     if not roster or not (0 <= ui._rrc_panel_idx < len(roster)):
         return False
@@ -534,23 +709,47 @@ def panel_click(ui):
     # so plainly, and say() trims to the cap before sending. Refusing the
     # insert silently would be worse than either.
     ui._rrc_input += token + " "
-    ui._rrc_panel = False
-    _invalidate_rows(ui)
+    panel_close(ui)
+    return True
+
+
+def _rooms_panel_click(ui):
+    """Join the highlighted room, or open the join-by-name prompt.
+
+    The name goes out bare: rrc_client.join() strips a leading "#" anyway,
+    and rrcd's _norm_room() has no "#" semantics, so sending the name as
+    displayed would join -- or silently create -- a second empty room
+    beside the real one.
+
+    A key cannot be carried here: a click has one field. That is what the
+    action row is for, and why the prompt it opens splits on a space
+    (_handle_prompt_key) into room and key.
+    """
+    rows = _room_rows(ui)
+    if not (0 <= ui._rrc_panel_idx < len(rows)):
+        return False
+    row = rows[ui._rrc_panel_idx]
+    panel_close(ui)
+    if row is None:
+        ui._rrc_prompt = True
+        ui._rrc_input = ""
+    elif ui.on_rrc_join:
+        ui.on_rrc_join(row[0])
     ui.dirty = True
     return True
 
 
 def panel_scroll(ui, delta):
-    """Move the panel selection by delta rows, clamped to the roster, and
+    """Move the panel selection by delta rows, clamped to the row list, and
     keep the visible window (ui._rrc_panel_scroll) tracking it. Called for
     both single trackball ticks and multi-tick drains, so delta may be
     more than 1 in either direction."""
-    roster = ui._rrc_roster
-    if not roster:
+    total = _panel_len(ui)
+    if not total:
         ui._rrc_panel_idx = 0
         ui._rrc_panel_scroll = 0
         return
-    ui._rrc_panel_idx = max(0, min(len(roster) - 1, ui._rrc_panel_idx + delta))
+    ui._rrc_panel_idx = max(0, min(total - 1, ui._rrc_panel_idx + delta))
     if ui._rrc_panel_idx < ui._rrc_panel_scroll:
         ui._rrc_panel_scroll = ui._rrc_panel_idx
     elif ui._rrc_panel_idx >= ui._rrc_panel_scroll + PANEL_ROWS:
@@ -587,7 +786,7 @@ def draw_room(ui):
             ui._draw_row_cached(i + 2, "", y, ui.NEON_CYAN)
 
     if ui._rrc_panel:
-        draw_member_panel(ui)          # Task 9
+        draw_panel(ui)                 # Task 9
 
     _draw_composer(ui)
 

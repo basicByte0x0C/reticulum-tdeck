@@ -179,37 +179,42 @@ def test_alt_arrows():
               "got %r" % got)
 
 
-def test_alt_w_is_ctrl_w_for_the_rrc_member_panel():
-    """alt+w must reach rrc_ui.handle_key() as Ctrl-W, as it does on the v1.
+def test_alt_w_is_this_boards_press_of_the_ball():
+    """alt+w must reach the UI as a click, the gesture the v1 makes with its
+    trackball.
 
     The W slot's alt entry used to be None, and an empty alt entry falls back
-    to the base character (test_layer_fallback), so alt+w typed a literal 'w'
-    and the member panel -- along with click-to-mention -- had no way in on
-    this board at all. Pinning the byte here, rather than just "not b'w'",
-    is what keeps it equal to rrc_ui._ALT_W.
+    to the base character (test_layer_fallback), so alt+w typed a literal 'w'.
+    It was then filled with Ctrl-W to match a constant in rrc_ui -- but that
+    constant was wrong about the v1, whose keyboard firmware resolves its own
+    layer and never emits a byte for alt+w at all. The panels are opened by a
+    click on both boards now, so this slot carries KEY_CLICK and
+    board_tdeck_pro._NAV turns it into gui.nav_event("click").
+
+    Pinning the byte, rather than just "not b'w'", is what keeps it equal to
+    the code that board adapter routes.
     """
     i2c, _, kb = new()
     got = tap(i2c, kb, 29, 8)         # alt + w
-    check("alt+w emits Ctrl-W", got == bytes([tca8418.KEY_CTRL_W]), repr(got))
-    check("and that is the byte rrc_ui matches on",
-          tca8418.KEY_CTRL_W == 0x17)
+    check("alt+w emits the click code", got == bytes([tca8418.KEY_CLICK]),
+          repr(got))
     i2c.press(8)
     check("a bare w is still a w", kb.get_key() == b'w')
-    # board_tdeck_pro.get_key() consumes the arrow codes and the backlight
-    # toggle before the UI ever sees them, so a code that collided with one of
-    # those would be swallowed between this driver and rrc_ui. (The board
-    # module itself cannot be imported on the host -- it touches the panel and
-    # the radio -- so this pins the constants it filters on instead.)
-    check("Ctrl-W is not a code the board adapter swallows",
-          tca8418.KEY_CTRL_W not in (tca8418.KEY_UP, tca8418.KEY_DOWN,
-                                     tca8418.KEY_LEFT, tca8418.KEY_RIGHT,
-                                     tca8418.KEY_BL_TOGGLE))
+    # board_tdeck_pro.get_key() routes the nav codes through _NAV before the
+    # UI sees them, and swallows the backlight toggle. KEY_CLICK belongs to
+    # the first group and must not collide with the second. (The board module
+    # itself cannot be imported on the host -- it touches the panel and the
+    # radio -- so this pins the constants it filters on instead.)
+    check("the click code sits in the nav block, clear of the arrows",
+          tca8418.KEY_CLICK not in (tca8418.KEY_UP, tca8418.KEY_DOWN,
+                                    tca8418.KEY_LEFT, tca8418.KEY_RIGHT,
+                                    tca8418.KEY_BL_TOGGLE))
 
 
 def test_no_two_keys_share_a_mapping():
-    """0x17 has to be unambiguous: it is now a UI binding, not just a byte
-    passed to a remote pty. Nothing else in the matrix may emit it, on any
-    layer -- and while checking that, catch any other collision too."""
+    """The click code has to be unambiguous: it is a UI gesture, not just a
+    byte passed to a remote pty. Nothing else in the matrix may emit it, on
+    any layer -- and while checking that, catch any other collision too."""
     seen = {}
     dupes = []
     for idx, layers in enumerate(tca8418._KEYMAP):
@@ -223,9 +228,9 @@ def test_no_two_keys_share_a_mapping():
                 seen[out] = (idx, layer)
     check("no keystroke is produced by two different keys", not dupes,
           repr(dupes))
-    check("Ctrl-W comes from exactly one key",
-          seen.get(bytes([tca8418.KEY_CTRL_W])) == (8, 3),
-          repr(seen.get(bytes([tca8418.KEY_CTRL_W]))))
+    check("the click code comes from exactly one key",
+          seen.get(bytes([tca8418.KEY_CLICK])) == (8, 3),
+          repr(seen.get(bytes([tca8418.KEY_CLICK]))))
 
 
 def test_modifier_expiry():
@@ -327,7 +332,7 @@ if __name__ == "__main__":
     test_shift_layer()
     test_sym_layer()
     test_alt_arrows()
-    test_alt_w_is_ctrl_w_for_the_rrc_member_panel()
+    test_alt_w_is_this_boards_press_of_the_ball()
     test_no_two_keys_share_a_mapping()
     test_modifier_expiry()
     test_layer_fallback()

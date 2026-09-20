@@ -174,6 +174,11 @@ _NAV = {
     tca8418.KEY_DOWN: "down",
     tca8418.KEY_LEFT: "left",
     tca8418.KEY_RIGHT: "right",
+    # Alt+W is this board's press of the ball. The v1 opens the RRC member
+    # panel and the room picker by clicking the trackball; without a click
+    # here the Pro could open neither, and since joining by name lives on
+    # the picker's action row it could not join a room at all.
+    tca8418.KEY_CLICK: "click",
 }
 
 _gui = None

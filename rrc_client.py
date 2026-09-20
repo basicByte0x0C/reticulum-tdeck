@@ -430,7 +430,8 @@ LIST_HEADER = "Registered public rooms:"
 
 
 def _hash_room_list(text):
-    """Prefix "#" onto the room names in an rrcd /list reply.
+    """Prefix "#" onto the room names in an rrcd /list reply, and capture
+    them for the room picker.
 
     This is the one place the client reads the *shape* of hub prose, and it
     is deliberately narrow. Everything else renders NOTICEs verbatim,
@@ -440,6 +441,12 @@ def _hash_room_list(text):
 
     rrcd builds the reply as "  {name}" or "  {name} - {topic}"
     (commands.py), one room per line under that header.
+
+    The picker's rows are taken here rather than in a parser of their own:
+    the block is already being walked under an already-argued guard, so a
+    hub with different wording degrades to an empty picker instead of one
+    full of its MOTD. Captured names are BARE -- join() owns the "#" and
+    the wire must never carry one.
     """
     if not text:
         return text
@@ -447,12 +454,22 @@ def _hash_room_list(text):
     if not lines or lines[0].strip() != LIST_HEADER:
         return text
     out = [lines[0]]
+    rooms = []
     for line in lines[1:]:
         body = line.strip()
         if body and not body.startswith("#"):
             out.append("  #" + body)
         else:
             out.append(line)
+        if body:
+            name, _, topic = body.partition(" - ")
+            name = name.strip()
+            if name.startswith("#"):
+                name = name[1:].strip()
+            if name:
+                rooms.append((name, topic.strip()))
+    if _gui is not None:
+        _gui.rrc_rooms(rooms)
     return "\n".join(out)
 
 

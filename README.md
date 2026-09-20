@@ -229,11 +229,11 @@ mpremote cp tdeck_node.py :/main.py
 
 ### Node List Screen
 
-The device starts on the node list screen with three tabs: **MSG** (LXMF chat peers), **NET** (browsable NomadNet nodes), and **RNSH** (rnsh shell listeners), all populated from announces. Peers with unread messages are marked with `*`. A NomadNet instance announces both aspects, so it appears in both MSG and NET — chattable in MSG, browsable in NET.
+The device starts on the node list screen with four tabs: **MSG** (LXMF chat peers), **NET** (browsable NomadNet nodes), **RNSH** (rnsh shell listeners) and **RRC** (chat-room hubs), all populated from announces. Peers with unread messages are marked with `*`. A NomadNet instance announces both aspects, so it appears in both MSG and NET — chattable in MSG, browsable in NET.
 
 | Action | Input |
 |---|---|
-| Switch MSG/NET/RNSH tab | Trackball left/right (or `b`) |
+| Switch MSG/NET/RNSH/RRC tab | Trackball left/right (or `b`) |
 | Select peer/node | Trackball up/down |
 | Open chat / node page / shell | Trackball click (or Enter) |
 | Enter rnsh hash manually (RNSH) | Press `m` |
@@ -284,7 +284,7 @@ The RNSH tab lists [rnsh](https://github.com/acehoss/rnsh) listeners heard via a
 | Type input | Keyboard |
 | Send line (line mode) | Enter |
 | Arrow keys → remote | Trackball up/down/left/right |
-| Ctrl-C / Ctrl-D / Ctrl-Z | `Sym`/`Alt`+`c`/`d`/`z` (or direct control keys) |
+| Ctrl-C / Ctrl-D / Ctrl-Z | Control-key menu (trackball click) — see below |
 | Toggle line ⇄ char mode | Type `~l` + Enter |
 | Control-key menu | Trackball click |
 | Change font / grid size | Control-key menu → `Font` (click to cycle) |
@@ -305,7 +305,38 @@ Switching rewraps the local scrollback and sends a `WindowSizeMessage`, so the r
 
 **Line mode** (default) buffers a line locally with echo and sends it on Enter — usable over multi-hop LoRa, where the round-trip per keystroke of char mode would be painful. **Char-at-a-time mode** (`~l`) sends every keystroke raw for programs that need it (tab-completion, editors); it shines over WiFi/TCP. rnsh over LoRa is slow (one ≤417-byte packet per round trip); WiFi/TCP is snappy.
 
-v1 limitations: text-log rendering only (no full-screen TUI — ANSI cursor addressing is stripped, so `bash` tab-completion and multi-line prompts can garble), one session at a time, and the exact `Sym`/`Alt` control-key codes depend on your keyboard firmware.
+v1 limitations: text-log rendering only (no full-screen TUI — ANSI cursor addressing is stripped, so `bash` tab-completion and multi-line prompts can garble), and one session at a time.
+
+The v1 keyboard cannot send Ctrl combinations, which is why the control-key menu exists rather than being a convenience. Its ESP32-C3 resolves the keyboard layer itself and hands the host one already-resolved ASCII byte, and [its firmware](https://github.com/Xinyuan-LilyGO/T-Deck/blob/master/examples/Keyboard_ESP32C3/Keyboard_ESP32C3.ino) reads the `Alt` key in exactly two hardcoded combinations — `Alt`+`B` (backlight) and `Alt`+`C` (`0x0C`). Every other `Alt` combination arrives as the plain letter. `Sym` does select a second layer, but that layer is the digits and punctuation, which have no other key on this board (`Sym`+`w` is the only way to type `1`), so it cannot carry a shortcut either.
+
+### RRC Rooms (RRC tab)
+
+The RRC tab lists chat-room hubs heard via announces. Clicking one links to it, identifies your node and opens the **hub console** — the hub's MOTD and its room list, rendered as the hub sent them.
+
+Rooms are IRC-style multi-user chat over Reticulum. Sessions are **on-demand**: opening a hub links and identifies, backing out parts and closes, so a room costs airtime only while you are reading it. One room is joined at a time.
+
+Both screens work the same way, and neither binds a letter key:
+
+**click** opens the list that screen is about · **click again** acts on the highlighted row · **backspace** closes it
+
+| Action | Input |
+|---|---|
+| Open the room picker (console) | Trackball click |
+| Join the highlighted room | Click it in the picker |
+| Join by name, or with a key | Picker → `+ join by name...` → type `#room` or `#room secret` |
+| Leave the hub | Backspace |
+| Open the member list (in a room) | Trackball click (or type `/who`) |
+| Mention someone | Click them in the member list — inserts `@nick` |
+| Scroll either list | Trackball up/down |
+| Leave the room | Backspace on an empty composer |
+
+Opening the picker re-asks the hub for its room list, at most once every 10 seconds, so it shows what the hub has now rather than a snapshot from connect time. The list can legitimately be empty: `/list` returns only *registered public* rooms, and a hub whose rooms are all on-demand lists none. The picker says which case you are in — `asking hub...` until a reply lands, then `hub lists no public rooms` — and the `+ join by name...` row still reaches any room, listed or not.
+
+The `#` is ours. rrcd has no `#` semantics, so names are shown IRC-style and stripped before they reach the wire; a room a hub genuinely named `#varna` is therefore unreachable from this device.
+
+`/who` is answered locally rather than sent: the hub replies in one unchunked envelope with no size guard, so past roughly thirteen members the reply overruns the link MDU and you receive nothing. The member list is built from the join/part events instead, which is both reachable and more accurate. Every other slash command (`/me`, `/topic`, `/whois`, `/list`, …) goes to the hub as usual.
+
+On the **T-Deck Pro**, which has no trackball, `Alt`+`W` is the click.
 
 ### Chat Screen
 

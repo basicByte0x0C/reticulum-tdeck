@@ -29,6 +29,7 @@ class FakeGui:
         self.status = []
         self._wake_mode = 0
         self.members = []           # rrc_members() snapshots, newest last
+        self.rooms = []             # rrc_rooms() snapshots, newest last
 
     def add_rrc_hub(self, dest_hash, name=None, hops=None):
         self.hubs.append((dest_hash, name, hops))
@@ -50,6 +51,12 @@ class FakeGui:
         # roster change (Task 9) -- every FakeGui needs it or the fixture
         # crashes, not just the ones with a _session()-installed override.
         self.members.append(members)
+
+    def rrc_rooms(self, rooms):
+        # Same contract as rrc_members(): the /list reply pushes the room
+        # picker's rows here, so every FakeGui needs it or a NOTICE
+        # carrying a room list crashes the fixture.
+        self.rooms.append(rooms)
 
 
 def _reset():
@@ -515,6 +522,32 @@ def test_the_room_list_is_shown_with_hashes():
     text = g.lines[-1][2]
     assert text == "Registered public rooms:\n  #varna - chat here\n  #general", text
     print("ok test_the_room_list_is_shown_with_hashes")
+
+
+def test_the_room_list_is_captured_for_the_picker():
+    """The picker's rows come out of the block we already parse.
+
+    _hash_room_list() is the one place this client reads the shape of hub
+    prose, and it walks this exact block to prefix the "#". Capturing the
+    names there costs no second parse and adds no second guard -- and it
+    keeps the names BARE, because join() owns the "#" strip and the wire
+    must never see one.
+    """
+    g, link = _session()
+    body = "Registered public rooms:\n  varna - chat here\n  general"
+    rrc_client._on_packet(_env(P.T_NOTICE, body=body))
+    assert g.rooms[-1] == [("varna", "chat here"), ("general", "")], g.rooms
+    print("ok test_the_room_list_is_captured_for_the_picker")
+
+
+def test_foreign_hub_prose_captures_no_rooms():
+    """Same narrow guard as the "#" prefix: a hub that words its header
+    differently degrades to an empty picker, never to a picker full of
+    someone's MOTD."""
+    g, link = _session()
+    rrc_client._on_packet(_env(P.T_NOTICE, body="Rooms on this hub:\n  varna"))
+    assert g.rooms == [], g.rooms
+    print("ok test_foreign_hub_prose_captures_no_rooms")
 
 
 def test_other_hub_prose_is_never_rewritten():

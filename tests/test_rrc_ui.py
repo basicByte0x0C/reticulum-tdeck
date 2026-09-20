@@ -18,6 +18,13 @@ import rrc_cbor as C
 import rrc_client
 import rrc_proto as P
 
+import time as _time
+
+
+def _time_ms():
+    """The clock rrc_ui._settled() reads. test_ui_shell installs the shim."""
+    return _time.ticks_ms()
+
 
 class _FakeLink:
     """Just enough link for compose_cap() and say()."""
@@ -164,13 +171,32 @@ def test_room_browser_renders_hub_notices_verbatim():
     print("ok test_room_browser_renders_hub_notices_verbatim")
 
 
-def test_j_opens_the_room_name_prompt():
+def test_j_is_no_longer_a_route_into_the_prompt():
+    """One way in per context. Joining by name lives on the picker's action
+    row now, so a bare letter on the console does nothing -- the console has
+    no text field, and a second entry point to the same prompt is the kind
+    of split the click rule exists to remove."""
     g = make_ui()
     g.state = U.STATE_RRC_ROOMS
     import rrc_ui
     rrc_ui.handle_key(g, ord("j"), b"j")
+    assert g._rrc_prompt is False
+    print("ok test_j_is_no_longer_a_route_into_the_prompt")
+
+
+def test_the_action_row_opens_the_room_name_prompt():
+    """The picker's first row is the only way to a room /list never names:
+    an on-demand room, a +k room needing a key, or one that does not exist
+    yet. It has to reach the same prompt (j) used to."""
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")
+    assert g._rrc_panel_idx == 0, "an empty picker opens on the action row"
+    rrc_ui.panel_click(g)
     assert g._rrc_prompt is True
-    print("ok test_j_opens_the_room_name_prompt")
+    assert g._rrc_panel is False, "the panel closes behind the prompt"
+    print("ok test_the_action_row_opens_the_room_name_prompt")
 
 
 def test_the_room_header_shows_the_name_irc_style():
@@ -236,13 +262,13 @@ def test_who_is_matched_exactly_not_as_a_prefix():
 
 def test_backspace_closes_the_member_panel():
     """The panel swallows every key it does not handle, so backspace did
-    nothing there -- indistinguishable from a stuck overlay. alt+w and a
-    trackball click already closed it; backspace is the app's universal
-    back and now does too."""
+    nothing there -- indistinguishable from a stuck overlay. A second click
+    already closed it; backspace is the app's universal back and now does
+    too."""
     import rrc_ui
     g, link = _hub_driven_ui()
     g.state = U.STATE_RRC_CHAT
-    rrc_ui.handle_key(g, rrc_ui._ALT_W, bytes([rrc_ui._ALT_W]))
+    rrc_ui.panel_toggle(g, "members")
     assert g._rrc_panel is True
     rrc_ui.handle_key(g, 8, b"\x08")
     assert g._rrc_panel is False, "backspace must close the member panel"
@@ -260,7 +286,8 @@ def test_backspace_edits_the_prompt_then_leaves_it():
     g = make_ui()
     g.state = U.STATE_RRC_ROOMS
     import rrc_ui
-    rrc_ui.handle_key(g, ord("j"), b"j")
+    rrc_ui.panel_toggle(g, "rooms")       # click opens the picker
+    rrc_ui.panel_click(g)                 # its action row opens the prompt
     for ch in "ab":
         rrc_ui.handle_key(g, ord(ch), ch.encode())
     rrc_ui.handle_key(g, 8, b"\x08")          # edits first
@@ -337,7 +364,8 @@ def test_prompt_enter_joins_the_typed_room():
     joined = []
     g.on_rrc_join = lambda room, key=None: joined.append((room, key))
     import rrc_ui
-    rrc_ui.handle_key(g, ord("j"), b"j")
+    rrc_ui.panel_toggle(g, "rooms")       # click opens the picker
+    rrc_ui.panel_click(g)                 # its action row opens the prompt
     for ch in "#varna":
         rrc_ui.handle_key(g, ord(ch), ch.encode())
     rrc_ui.handle_key(g, 13, b"\r")
@@ -351,7 +379,8 @@ def test_prompt_splits_a_room_key_on_whitespace():
     joined = []
     g.on_rrc_join = lambda room, key=None: joined.append((room, key))
     import rrc_ui
-    rrc_ui.handle_key(g, ord("j"), b"j")
+    rrc_ui.panel_toggle(g, "rooms")       # click opens the picker
+    rrc_ui.panel_click(g)                 # its action row opens the prompt
     for ch in "#secret hunter2":
         rrc_ui.handle_key(g, ord(ch), ch.encode())
     rrc_ui.handle_key(g, 13, b"\r")
@@ -588,17 +617,249 @@ def test_back_parts_the_room_and_returns_to_the_console():
     print("ok test_back_parts_the_room_and_returns_to_the_console")
 
 
-def test_alt_w_opens_the_panel_and_takes_focus():
+def _click(g):
+    """One trackball click, through the real dispatch rather than around it.
+
+    The click path is the whole point of these tests, so they drive
+    handle_trackball() the way the ISRs do instead of calling the panel
+    helpers directly -- a panel that opens but is unreachable by thumb is
+    exactly the bug being fixed.
+    """
+    g.locked = False
+    g._screen_on = True
+    g._irq_click = 1
+    g.handle_trackball()
+
+
+def test_console_click_opens_the_room_picker():
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    _click(g)
+    assert g._rrc_panel is True, "the console footer promises click=open"
+    assert g._rrc_panel_kind == "rooms", g._rrc_panel_kind
+    print("ok test_console_click_opens_the_room_picker")
+
+
+def test_room_click_opens_the_member_panel():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    _click(g)
+    assert g._rrc_panel is True
+    assert g._rrc_panel_kind == "members", g._rrc_panel_kind
+    print("ok test_room_click_opens_the_member_panel")
+
+
+def test_the_panel_still_takes_focus_from_the_composer():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    _click(g)
+    import rrc_ui
+    rrc_ui.handle_key(g, ord("x"), b"x")
+    assert g._rrc_input == "", g._rrc_input
+    print("ok test_the_panel_still_takes_focus_from_the_composer")
+
+
+def test_alt_w_is_not_a_panel_route_any_more():
+    """alt+w cannot reach this app, so nothing may pretend to match it.
+
+    The v1 keyboard's ESP32-C3 resolves modifiers itself and sends ONE
+    resolved ASCII byte (board_tdeck_v1.get_key() reads exactly one).
+    Its printMatrix() consults the Sym key alone when picking a layer --
+    ALT appears only in two hardcoded combos, Alt+B and Alt+C -- so alt+w
+    arrives as a plain 'w' and must reach the composer like any letter.
+    """
     g = make_ui()
     g.state = U.STATE_RRC_CHAT
     g._rrc_room = "#varna"
     import rrc_ui
-    rrc_ui.handle_key(g, ord("w"), b"\x1bw")     # alt+w arrives esc-prefixed
-    assert g._rrc_panel is True
-    # a letter no longer reaches the composer while the panel has focus
-    rrc_ui.handle_key(g, ord("x"), b"x")
-    assert g._rrc_input == ""
-    print("ok test_alt_w_opens_the_panel_and_takes_focus")
+    rrc_ui.handle_key(g, ord("w"), b"w")
+    assert g._rrc_panel is False, "a bare letter must not open the panel"
+    assert g._rrc_input == "w", g._rrc_input
+    print("ok test_alt_w_is_not_a_panel_route_any_more")
+
+
+def test_panel_footer_names_a_key_that_exists():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g._rrc_panel = True
+    g.rrc_members([(b"\x11" * 16, "sv2rck")])
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_member_panel(g)
+    painted = _painted(g.tft.calls)
+    assert "alt+w" not in painted, painted
+    assert "bksp close" in painted, painted
+    print("ok test_panel_footer_names_a_key_that_exists")
+
+
+def test_the_picker_shows_rooms_irc_style_under_the_action_row():
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g.rrc_rooms([("varna", "chat here"), ("general", "")])
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")
+    g.tft.calls = []
+    rrc_ui.draw_rooms_panel(g)
+    painted = _painted(g.tft.calls)
+    assert "+ join by name" in painted, painted
+    assert "#varna" in painted, painted
+    assert "chat here" in painted, painted
+    assert "#general" in painted, painted
+    print("ok test_the_picker_shows_rooms_irc_style_under_the_action_row")
+
+
+def test_clicking_a_room_joins_it_with_a_bare_name():
+    """The "#" is ours. rrcd's _norm_room() is strip().lower() with no "#"
+    semantics, so sending the name as shown would join -- or silently
+    create -- a second empty room beside the real one."""
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    joined = []
+    g.on_rrc_join = lambda room, key=None: joined.append((room, key))
+    g.rrc_rooms([("varna", "chat here"), ("general", "")])
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")
+    rrc_ui.panel_click(g)
+    assert joined == [("varna", None)], joined
+    assert g._rrc_panel is False, "the panel closes behind the join"
+    print("ok test_clicking_a_room_joins_it_with_a_bare_name")
+
+
+def test_the_picker_opens_on_the_first_real_room_when_the_hub_listed_any():
+    """Cursor where the common action is, so joining a listed room is one
+    click rather than a click and a roll past the action row."""
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g.rrc_rooms([("varna", ""), ("general", "")])
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")
+    assert g._rrc_panel_idx == 1, g._rrc_panel_idx
+    print("ok test_the_picker_opens_on_the_first_real_room_when_the_hub_listed_any")
+
+
+def test_opening_the_picker_refreshes_the_room_list():
+    """The picker is the room list, so opening it asks for a current one.
+
+    rrc_client requests the list automatically on WELCOME, so this is not
+    about getting it at all -- it is about it being right. (l) used to be
+    the only refresh; with the list living behind a gesture, the gesture
+    has to carry it or a hub whose rooms changed mid-session would show a
+    stale snapshot with no way to re-ask.
+    """
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    asked = []
+    g.on_rrc_list = lambda: asked.append(1)
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")
+    assert asked == [1], asked
+    rrc_ui.panel_close(g)
+    g.rrc_rooms([("varna", "")])           # a reply lands
+    g._rrc_list_ms = 0                     # ...and the throttle window passes
+    rrc_ui.panel_toggle(g, "rooms")
+    assert asked == [1, 1], "a second open asks again"
+    print("ok test_opening_the_picker_refreshes_the_room_list")
+
+
+def test_the_picker_does_not_lean_on_the_hub_when_toggled():
+    """rrcd allows 240 msgs/minute. Opening and shutting the panel is one
+    gesture repeated, so the refresh is throttled rather than sent per
+    open."""
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    asked = []
+    g.on_rrc_list = lambda: asked.append(1)
+    import rrc_ui
+    for _ in range(6):
+        rrc_ui.panel_toggle(g, "rooms")    # open
+        rrc_ui.panel_toggle(g, "rooms")    # shut
+    assert asked == [1], asked
+    print("ok test_the_picker_does_not_lean_on_the_hub_when_toggled")
+
+
+def test_the_empty_picker_separates_asking_from_an_empty_answer():
+    """"No rooms yet" and "this hub has no public rooms" looked identical
+    before, and only the second one means stop waiting."""
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")
+    g.tft.calls = []
+    rrc_ui.draw_rooms_panel(g)
+    painted = _painted(g.tft.calls)
+    assert "asking hub" in painted, painted
+    g.rrc_rooms([])                        # the hub answers: nothing listed
+    g.tft.calls = []
+    rrc_ui.draw_rooms_panel(g)
+    painted = _painted(g.tft.calls)
+    assert "hub lists no public rooms" in painted, painted
+    print("ok test_the_empty_picker_separates_asking_from_an_empty_answer")
+
+
+def test_backspace_exits_the_hub_console():
+    """The console's last letter key is gone. Backspace is the app's
+    universal back (ui.py:2635-2641) and this screen has no text field, so
+    nothing else wants the key."""
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g._state_change_ms = 0                 # settled, not just arrived
+    left = []
+    g.on_rrc_disconnect = lambda: left.append(1)
+    import rrc_ui
+    rrc_ui.handle_key(g, 8, b"\x08")
+    assert left == [1], "backspace must tear the hub link down"
+    assert g.state == U.STATE_NODES, g.state
+    assert g.node_tab == U.TAB_RRC, g.node_tab
+    print("ok test_backspace_exits_the_hub_console")
+
+
+def test_a_phantom_backspace_on_arrival_does_not_exit_the_console():
+    """Same guard the room already has: a state change can be followed by a
+    stray byte from the keyboard controller, which would bounce the user
+    straight back out of the console they just opened."""
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g._state_change_ms = _time_ms()        # just arrived
+    left = []
+    g.on_rrc_disconnect = lambda: left.append(1)
+    import rrc_ui
+    rrc_ui.handle_key(g, 8, b"\x08")
+    assert left == [], "a keystroke this early is not the user's"
+    assert g.state == U.STATE_RRC_ROOMS, g.state
+    print("ok test_a_phantom_backspace_on_arrival_does_not_exit_the_console")
+
+
+def test_b_and_l_are_no_longer_console_keys():
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g._state_change_ms = 0
+    asked, left = [], []
+    g.on_rrc_list = lambda: asked.append(1)
+    g.on_rrc_disconnect = lambda: left.append(1)
+    import rrc_ui
+    for ch in "blBL":
+        rrc_ui.handle_key(g, ord(ch), ch.encode())
+    assert asked == [], "the picker owns the list now"
+    assert left == [], "backspace owns the exit now"
+    assert g.state == U.STATE_RRC_ROOMS, g.state
+    print("ok test_b_and_l_are_no_longer_console_keys")
+
+
+def test_the_empty_picker_says_why_and_still_offers_the_action_row():
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g.rrc_rooms([])
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")
+    g.tft.calls = []
+    rrc_ui.draw_rooms_panel(g)
+    painted = _painted(g.tft.calls)
+    assert "hub lists no public rooms" in painted, painted
+    assert "+ join by name" in painted, painted
+    print("ok test_the_empty_picker_says_why_and_still_offers_the_action_row")
 
 
 def test_panel_lists_nick_or_question_mark_with_hash():
@@ -750,9 +1011,9 @@ def test_roster_shrink_does_not_strand_the_panel_past_the_members():
 
 def test_draw_room_paints_the_panel_when_it_is_open():
     # Minor 1: every other panel test calls draw_member_panel() directly.
-    # draw_room()'s "if ui._rrc_panel: draw_member_panel(ui)" dispatch is
-    # the only thing connecting panel-open state to the panel actually
-    # painting, and nothing exercised it.
+    # draw_room()'s "if ui._rrc_panel: draw_panel(ui)" dispatch is the only
+    # thing connecting panel-open state to the panel actually painting, and
+    # nothing exercised it.
     g = make_ui()
     g.state = U.STATE_RRC_CHAT
     g._rrc_room = "#varna"
@@ -1111,7 +1372,9 @@ def test_typing_e_and_x_reaches_the_join_prompt_through_handle_key():
     g.state = U.STATE_RRC_ROOMS
     joined = []
     g.on_rrc_join = lambda room, key=None: joined.append((room, key))
-    g.handle_key(b"j")                 # (j) opens the room-name prompt
+    import rrc_ui
+    rrc_ui.panel_toggle(g, "rooms")    # click opens the picker
+    rrc_ui.panel_click(g)              # its action row opens the prompt
     assert g._rrc_prompt is True
     for c in "#mesh-extra":
         g.handle_key(c.encode())
@@ -1136,38 +1399,31 @@ def test_e_and_x_still_scroll_the_hub_console_when_no_prompt_is_open():
     print("ok test_e_and_x_still_scroll_the_hub_console_when_no_prompt_is_open")
 
 
-# --- Critical 2: alt+w as the keyboard actually delivers it -----------------
+# --- Critical 2: the panel's way in, per board ----------------------------
 
 
-def test_alt_w_control_code_opens_the_panel_through_handle_key():
-    # board_tdeck_v1.get_key() is a ONE-byte i2c read and ui.kbd_loop() calls
-    # handle_key() once per byte, so the old two-byte b"\x1bw" comparison
-    # could never be true on hardware -- and it was the only setter of
-    # _rrc_panel, so the panel, click-to-mention and mention_for() were all
-    # unreachable. The v1 keyboard puts its alt layer on the control codes
-    # (README: Sym/Alt+c = Ctrl-C), so alt+w is Ctrl-W = 0x17.
+def test_the_panel_opens_on_a_click_not_a_control_code():
+    """0x17 used to open the panel, on the theory that the v1 put its alt
+    layer on the control codes. It does not: LilyGO's keyboard firmware
+    resolves the layer itself and alt+w leaves as a plain 'w'. The byte is
+    real on the Pro, whose alt layer is our own tca8418 keymap -- so that
+    board now sends a click instead (board_tdeck_pro._NAV), and both boards
+    open the panel through the one gesture.
+    """
     g = make_ui()
     g.state = U.STATE_RRC_CHAT
     g._rrc_room = "#varna"
     g.rrc_members([(b"\x11" * 16, "sv2rck")])
     g.handle_key(b"\x17")
+    assert g._rrc_panel is False, "no control code opens the panel any more"
+    g.nav_event("click")
+    g.handle_trackball()
     assert g._rrc_panel is True
-    assert g._rrc_input == "", "alt+w must not compose a character"
-    g.handle_key(b"\x17")                    # and it toggles back
-    assert g._rrc_panel is False
-    print("ok test_alt_w_control_code_opens_the_panel_through_handle_key")
-
-
-def test_alt_w_esc_prefixed_form_still_opens_the_panel():
-    # Kept as a harmless alternative in case a keyboard firmware reports the
-    # alt layer esc-prefixed; whichever the hardware emits, the panel opens.
-    g = make_ui()
-    g.state = U.STATE_RRC_CHAT
-    g._rrc_room = "#varna"
-    g.rrc_members([(b"\x11" * 16, "sv2rck")])
-    g.handle_key(b"\x1bw")
-    assert g._rrc_panel is True
-    print("ok test_alt_w_esc_prefixed_form_still_opens_the_panel")
+    assert g._rrc_input == "", "the click must not compose a character"
+    g.nav_event("click")
+    g.handle_trackball()
+    assert g._rrc_panel is False, "and a second click toggles it shut"
+    print("ok test_the_panel_opens_on_a_click_not_a_control_code")
 
 
 # --- Important 4: the panel must not stay painted after it closes ----------
@@ -1194,13 +1450,14 @@ def test_every_panel_close_path_invalidates_the_row_cache():
         g.rrc_members([(b"\x11" * 16, "sv2rck")])
         g.on_rrc_mention = lambda h: "@sv2rck"
         rrc_ui.draw_room(g)                  # fills the row cache
-        g.handle_key(b"\x17")                # alt+w
+        g.nav_event("click")                 # the gesture that opens it
+        g.handle_trackball()
         assert g._rrc_panel is True
         rrc_ui.draw_room(g)                  # paints the panel over those rows
         return g
 
     closers = (
-        ("alt+w toggle", lambda g: g.handle_key(b"\x17")),
+        ("second click", lambda g: (g.nav_event("click"), g.handle_trackball())),
         ("esc", lambda g: g.handle_key(b"\x1b")),
         ("panel click", lambda g: rrc_ui.panel_click(g)),
     )
@@ -1461,7 +1718,8 @@ def test_a_bytes_nick_mention_cannot_kill_kbd_loop():
     g, link = _hub_driven_ui()
     g.state = U.STATE_RRC_CHAT
     _feed(P.T_JOINED, room="#varna", body=[b"\x22" * 16], nick=b"\xff\xfe")
-    g.handle_key(b"\x17")                        # alt+w opens the panel
+    g.nav_event("click")                     # a click opens the panel
+    g.handle_trackball()
     assert g._rrc_panel is True
     g._irq_click = 1
     g.handle_trackball()                         # must not raise
@@ -1995,7 +2253,8 @@ def _exercise_every_ui_path(g):
     g.state = U.STATE_RRC_ROOMS
     rrc_ui.draw_rooms(g)
     g.state = U.STATE_RRC_CHAT
-    g.handle_key(b"\x17")                    # alt+w opens the panel
+    g.nav_event("click")                     # a click opens the panel
+    g.handle_trackball()
     g._irq_down = 1
     g.handle_trackball()                     # move the panel selection
     g._irq_click = 1

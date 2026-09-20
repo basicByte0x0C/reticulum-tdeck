@@ -17,14 +17,21 @@
 # There are no dedicated arrow keys and no trackball on this board. Navigation
 # lives on the alt layer: E/X/S/F are up/down/left/right.
 #
-# Note that this is NOT the same alt layer the T-Deck v1 has. The v1 talks to a
-# keyboard co-processor whose alt/sym layer emits control codes (README: Sym or
-# Alt + c/d/z give Ctrl-C/D/Z); here the alt layer is a navigation layer this
-# module defines. Both are correct -- they are different keyboards -- but a
-# result from one board says nothing about the other, so anything riding on the
-# alt layer has to be checked on both. Alt+W is the one deliberate overlap: it
-# emits Ctrl-W here too, matching the v1, so the RRC member panel opens the same
-# way on both boards.
+# Note that this is NOT the same alt layer the T-Deck v1 has -- the v1 has no
+# usable one at all. It talks to a keyboard co-processor that resolves the
+# layer itself and returns a single already-resolved ASCII byte, and its
+# firmware (Xinyuan-LilyGO/T-Deck, examples/Keyboard_ESP32C3) consults its ALT
+# key in exactly two hardcoded combos, Alt+B and Alt+C; every other alt
+# combination comes out as the bare character. Its Sym key does pick a second
+# map, but that map is the digits and punctuation, which have no other key on
+# that board -- Sym+w is the only way to type "1" -- so it cannot carry a
+# binding either.
+#
+# Here the alt layer is a navigation layer this module defines, so it can. A
+# result from one board therefore says nothing about the other, and anything
+# riding on the alt layer has to be checked on both. Alt+W is the one
+# deliberate overlap, and it is a gesture rather than a character: see
+# KEY_CLICK below.
 
 import time
 from micropython import const
@@ -72,15 +79,23 @@ KEY_RIGHT = const(0xB7)
 # desynchronise both. board_tdeck_pro.get_key() routes it to the UI.
 KEY_BL_TOGGLE = const(0xAB)
 
-# Alt+W -> Ctrl-W, which is what opens the RRC member panel (rrc_ui._ALT_W).
+# Alt+W -> a select/click event, the gesture the v1 makes with its trackball.
 #
-# This board's alt layer is otherwise navigation (E/X/S/F as arrows, plus Tab,
-# Esc and the backlight toggle) rather than the v1 keyboard's control-code
-# layer, so the two schemes differ -- see the module docstring. The W slot was
-# empty, and an empty alt slot falls back to the base character in get_key(),
-# so alt+w used to type a literal 'w'. Filling it with the v1's encoding is
-# what lets one comparison in rrc_ui.handle_key() serve both boards.
-KEY_CTRL_W = const(0x17)
+# This board has no pointing device, so board_tdeck_pro._NAV turns this into
+# gui.nav_event("click") exactly as it does the four arrows -- ui.nav_event
+# exists so "every navigation path in this class is identical across boards".
+# That is what opens the RRC member panel in a room and the room picker on
+# the hub console, both of which the v1 reaches by pressing the ball.
+#
+# It used to be Ctrl-W (0x17), matched by a constant in rrc_ui, on the
+# understanding that the v1 put its alt layer on the control codes. It does
+# not: LilyGO's keyboard firmware for the v1
+# (examples/Keyboard_ESP32C3/Keyboard_ESP32C3.ino) resolves the layer inside
+# the keyboard and consults ALT in two hardcoded combos only, so alt+w leaves
+# that board as a plain 'w' and nothing in the app could ever match it. The
+# byte was only ever real here; pointing it at the shared gesture is what
+# makes one route serve both boards.
+KEY_CLICK = const(0xB8)          # next after KEY_RIGHT in the nav block
 
 # Layers per key index: (base, shift, sym, alt). None means the key emits
 # nothing on that layer. Index order is row-major across the 4x10 matrix.
@@ -93,7 +108,7 @@ _KEYMAP = (
     (b't', b'T', b'(', bytes([KEY_TAB])),
     (b'r', b'R', b'3', None),
     (b'e', b'E', b'2', bytes([KEY_UP])),
-    (b'w', b'W', b'1', bytes([KEY_CTRL_W])),
+    (b'w', b'W', b'1', bytes([KEY_CLICK])),
     (b'q', b'Q', b'#', bytes([KEY_ESC])),
     (bytes([KEY_BSP]), None, None, None),
     (b'l', b'L', b'"', None),

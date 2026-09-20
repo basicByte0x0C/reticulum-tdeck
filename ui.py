@@ -675,10 +675,14 @@ class UI:
         self._rrc_hub_name = None
         self._rrc_members = 0
         self._rrc_status = ""
-        self._rrc_panel = False         # member panel open (alt+w)
+        self._rrc_panel = False         # a panel overlay is open (trackball click)
+        self._rrc_panel_kind = "members"  # "members" in a room, "rooms" in the console
         self._rrc_panel_idx = 0
         self._rrc_panel_scroll = 0
         self._rrc_roster = []           # [(identity_hash, nick_or_None), ...]
+        self._rrc_rooms = []            # [(bare_name, topic), ...] from /list
+        self._rrc_list_seen = False     # has any /list reply ever landed?
+        self._rrc_list_ms = 0           # last /list request, for the refresh throttle
         self._rrc_prompt = False
 
     # --- Screen power management ---
@@ -2183,6 +2187,25 @@ class UI:
         self._rrc_members = count
         self.dirty = True
 
+    def rrc_rooms(self, rooms):
+        """Room snapshot from a /list reply: [(bare_name, topic), ...].
+
+        Names arrive without the "#" -- rrc_client.join() owns that strip
+        and the wire must never carry one -- so the picker adds it for
+        display exactly like every other room name on screen.
+
+        _rrc_list_seen records that a reply landed at all, which is what
+        separates "this hub has no registered public rooms" (a normal
+        state on a hub whose rooms are all on-demand) from "we never
+        asked". The picker only re-requests in the second case.
+        """
+        self._rrc_rooms = rooms
+        self._rrc_list_seen = True
+        if self._rrc_panel and self._rrc_panel_kind == "rooms":
+            import rrc_ui
+            rrc_ui.panel_clamp(self)
+        self.dirty = True
+
     def rrc_members(self, members):
         """Roster snapshot: [(identity_hash, nick_or_None), ...]. The member
         panel (rrc_ui.draw_member_panel) reads ui._rrc_roster directly; the
@@ -3503,10 +3526,11 @@ class UI:
 
         self.wake_screen()
 
-        # The focused member panel (alt+w) takes the trackball entirely
-        # while open: scroll members, click to mention, no page/tab
-        # switching and no scrollback movement underneath it.
-        if self.state == STATE_RRC_CHAT and self._rrc_panel:
+        # An open RRC panel takes the trackball entirely: scroll the rows,
+        # click to act on the highlighted one, no page/tab switching and no
+        # scrollback movement underneath it. Both panels behave this way --
+        # members in a room, rooms in the console.
+        if self._rrc_panel and self.state in (STATE_RRC_CHAT, STATE_RRC_ROOMS):
             import rrc_ui
             if up:
                 rrc_ui.panel_scroll(self, -up)
@@ -3585,6 +3609,20 @@ class UI:
                         self.on_audio_play(audio_data, audio_mode)
             elif self.state == STATE_SETTINGS:
                 self.handle_key(b'\x0D')
+            elif self.state == STATE_RRC_ROOMS:
+                # The console's own footer has always promised click=open.
+                # It is also the only way in now: this screen has no text
+                # field, so nothing else claims the gesture -- except the
+                # join prompt, which owns the screen while it is up.
+                if not self._rrc_prompt:
+                    import rrc_ui
+                    rrc_ui.panel_toggle(self, "rooms")
+            elif self.state == STATE_RRC_CHAT:
+                # Same gesture, the list this screen is about. The keyboard
+                # cannot reach it: alt+w is resolved inside the keyboard's
+                # own firmware and arrives as a plain 'w'.
+                import rrc_ui
+                rrc_ui.panel_toggle(self, "members")
             elif self.state == STATE_SHELL:
                 # click opens the control-key menu, or sends the selection
                 if self._shell_menu:
