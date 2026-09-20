@@ -1252,7 +1252,12 @@ def test_a_bytes_nick_mention_cannot_kill_kbd_loop():
     assert g._rrc_panel is True
     g._irq_click = 1
     g.handle_trackball()                         # must not raise
+    # Not merely "a str": the mention must actually have been inserted, or
+    # an implementation that swallowed the click would pass on "" alone.
     assert isinstance(g._rrc_input, str), g._rrc_input
+    assert g._rrc_input.startswith("@") and g._rrc_input.endswith(" "), \
+        g._rrc_input
+    assert g._rrc_panel is False
     import rrc_ui
     g.tft.calls = []
     rrc_ui.draw_room(g)                          # must not raise

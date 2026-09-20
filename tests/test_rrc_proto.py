@@ -68,8 +68,15 @@ def test_body_cap_is_the_smaller_of_hub_and_link():
     # 367 -- close enough to look right, and wrong in the direction that
     # overruns the MDU once a room name and a nick are added.)
     assert P.body_cap(431, 350, src=SRC) == 350
-    # A lower-MTU path inverts it: the link becomes the binding limit.
-    assert P.body_cap(200, 350, src=SRC) < 350
+    # A lower-MTU path inverts it: the link becomes the binding limit, and
+    # the cap is MAXIMAL there -- a body of exactly cap bytes fills the MDU
+    # to the byte. A merely-safe cap (the old constant's 136) would leave
+    # airtime on the table every message; this pins both directions without
+    # re-encoding the arithmetic as a magic number.
+    cap = P.body_cap(200, 350, src=SRC)
+    assert cap < 350, cap
+    env = P.make_envelope(P.T_MSG, src=SRC, body="x" * cap, ts=P._TS_PROBE)
+    assert len(C.dumps(env)) == 200, len(C.dumps(env))
     # No WELCOME limits yet: fall back to the protocol default.
     assert P.body_cap(431, None, src=SRC) == 350
     print("ok test_body_cap_is_the_smaller_of_hub_and_link")
