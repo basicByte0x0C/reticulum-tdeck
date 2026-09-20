@@ -60,12 +60,27 @@ L_MAX_BODY = 2
 L_MAX_ROOMS = 3
 L_RATE = 4
 
-# Worst-case bytes an envelope spends on everything but the body:
-# map header 1, ver 2, type 2, msg_id 10, ts 10, src 18, room ~8,
-# body header 3, nick ~10.
-ENVELOPE_OVERHEAD = 64
 DEFAULT_MAX_BODY = 350
 DEFAULT_MAX_NICK = 32
+
+# Envelope overhead is MEASURED, never assumed -- see envelope_overhead().
+# The constant this replaces (ENVELOPE_OVERHEAD = 64, taken from the spec)
+# was arithmetic on a guess and it was wrong: the fixed cost alone is 44
+# bytes, leaving only ~20 of that 64 for the room name and the nick
+# together. A 16-character room plus a 16-character nick and the hub's
+# 350-byte body encoded to 433 bytes against a 431-byte link MDU, and urns'
+# OutgoingLink.send() has no MDU guard (unlike request()) to catch it: the
+# oversized packet goes on air and is dropped or mangled after paying ~1.1 s
+# of LoRa airtime.
+#
+# A worst-case timestamp for the probe: now_ms() reads ~1.76e12, which CBOR
+# encodes as a 9-byte uint64, and no realistic mesh clock is smaller. An
+# unsynced device sends K_TS 0 (1 byte) instead, so probing with this is
+# conservative by 8 bytes rather than optimistic by any.
+_TS_PROBE = 1 << 60
+
+# CBOR head sizes by payload length (RFC 8949 major-type argument).
+_HEAD_BREAKS = ((24, 1), (256, 2), (65536, 3))
 
 # The two hub ERROR strings that drive behaviour rather than display.
 ERR_BANNED = "banned"
@@ -123,14 +138,87 @@ def normalize_nick(value, max_bytes=DEFAULT_MAX_NICK):
     return s or None
 
 
-def body_cap(mdu, hub_limit=None):
+def _head_len(n):
+    """Bytes the CBOR head of an n-byte string costs."""
+    for limit, size in _HEAD_BREAKS:
+        if n < limit:
+            return size
+    return 5
+
+
+def envelope_overhead(t=T_MSG, src=None, room=None, nick=None):
+    """Encoded bytes this session's envelope costs, body excluded.
+
+    Measured with a probe encode rather than counted by hand: room names
+    and nicks are variable-length and multi-byte, the timestamp's width
+    depends on the clock, and the sum of those guesses is what put a
+    433-byte packet on a 431-byte link."""
+    probe = make_envelope(t, src=src if src else b"\x00" * 16, room=room,
+                          body="", nick=nick, ts=_TS_PROBE)
+    return len(cbor.dumps(probe)) - 1       # less the empty body's own head
+
+
+def body_cap(mdu, hub_limit=None, src=None, room=None, nick=None, t=T_MSG):
     """Longest message body that fits both the hub's rule and the link.
 
-    The hub's 350-byte default leaves ~17 bytes of headroom at MTU 500,
-    and a path that negotiates lower inverts that, so this is computed
-    per session and never hardcoded."""
-    limit = hub_limit if hub_limit else DEFAULT_MAX_BODY
-    return max(1, min(limit, mdu - ENVELOPE_OVERHEAD))
+    Both bounds are per session: the hub's WELCOME limit, and whatever is
+    left of the link MDU once THIS session's envelope (its room name, its
+    nick, its timestamp) has been encoded and measured.
+
+    The hub limit arrives as untrusted CBOR and can be a string, a float,
+    a list or negative -- min("350", 367) raises TypeError, and it raises
+    on the say() path, which has no try/except between it and kbd_loop.
+    An unusable limit falls back to the protocol default, exactly as
+    normalize_nick() does with its own budget."""
+    if not isinstance(hub_limit, int) or isinstance(hub_limit, bool) \
+            or hub_limit <= 0:
+        hub_limit = DEFAULT_MAX_BODY
+    room_left = mdu - envelope_overhead(t, src, room, nick)
+    # Largest n whose head plus payload still fits. At most four steps: the
+    # head is 1, 2, 3 or 5 bytes and n only ever walks down within one band.
+    n = room_left - 1
+    while n > 0 and n + _head_len(n) > room_left:
+        n -= 1
+    # 0 is a real answer, not a floor to be papered over: a link whose MDU
+    # the room name and nick already fill has no room for a body at all,
+    # and encode_capped() refuses that packet rather than truncating it to
+    # one character and sending it anyway.
+    return max(0, min(hub_limit, n))
+
+
+def encode_capped(env, mdu):
+    """Encode env for the link, trimming K_BODY until the bytes fit.
+
+    body_cap() sizes the composer, but only the encoder knows what a given
+    envelope really costs, so the packet that goes on air is measured here
+    too -- and env is trimmed in step, so the caller can echo exactly what
+    was sent. Returns None only if even a bodiless envelope will not fit,
+    which means the link is unusable rather than the message too long."""
+    data = cbor.dumps(env)
+    if len(data) <= mdu:
+        return data
+    body = env.get(K_BODY)
+    if isinstance(body, str):
+        # One character is at least one byte, so dropping `over` characters
+        # drops at least `over` bytes: this converges in a step or two.
+        while body and len(data) > mdu:
+            over = len(data) - mdu
+            body = body[:-over] if over < len(body) else ""
+            env[K_BODY] = body
+            data = cbor.dumps(env)
+        if len(data) <= mdu:
+            return data
+    if K_BODY in env:
+        # Nothing trimmable left -- a bytes/int body, or an envelope whose
+        # room and nick alone fill the link. rrcd ignores the PONG body it
+        # asked us to echo (router.py:161-164), so dropping the body answers
+        # the ping rather than putting an oversized packet on air or going
+        # silent and being closed for it.
+        del env[K_BODY]
+        data = cbor.dumps(env)
+        if len(data) <= mdu:
+            return data
+    return None
 
 
 def make_envelope(t, src, room=None, body=None, nick=None, ts=None, mid=None):
