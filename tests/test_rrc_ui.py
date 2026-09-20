@@ -1660,6 +1660,186 @@ def test_rrc_ui_uses_the_wrapper_ui_already_has():
     print("ok test_rrc_ui_uses_the_wrapper_ui_already_has")
 
 
+# --- The durable guard: no hub field reaches the UI untyped ---------------
+#
+# Critical 1 was a data-flow defect, and four review passes walked past it
+# because every one of them asked "can _on_packet raise?" -- it cannot, it is
+# well guarded -- rather than following the values OUT of it. The tests above
+# pin the five exit points that were found. This one pins the RULE, so that
+# the next field added to _on_packet without routing through
+# rrc_client._txt() fails here instead of freezing a display on someone's
+# desk with the SPI lock still held.
+#
+# IF YOU ARE READING THIS BECAUSE IT WENT RED AFTER YOU ADDED A FIELD:
+# the rule is that no value originating from a hub may leave rrc_client as
+# anything but a str or None. Read it out of the envelope through
+# rrc_client._txt(), once, at the point of read -- not defensively at each
+# use downstream. See _txt()'s docstring for why the downstream is fatal.
+#
+# Deterministic by construction, in two layers:
+#   - an exhaustive product (every fuzzable envelope key x every hostile
+#     value x every rendering message type) with no randomness in it at all;
+#   - a tail that puts SEVERAL hostile fields in one envelope, seeded with
+#     the fixed constant below.
+# Nothing here reads the clock or os.urandom. A fuzz test that fails once a
+# fortnight on a value nobody can reproduce is deleted by whoever hits it,
+# and then the guard is gone. Change _SWEEP_SEED only deliberately, and
+# re-run the neutered-_txt check documented below when you do.
+_SWEEP_SEED = 20260919
+_SWEEP_COMBOS = 200          # multi-field envelopes, on top of the floor
+
+# Floats are absent on purpose, not by oversight: rrc_cbor cannot encode one,
+# and its decoder skips floats to None, so a float never reaches a field.
+_HOSTILE = (b"\xff\xfe", b"", b"\x11" * 16, b"\x00" * 300,
+            12345, -1, 0, True, False,
+            ["x"], [], [b"\x11" * 16, 7, "str"],
+            {"k": 1}, {},
+            "ok", "", "\x00\x1b[31m", "варна" * 8,
+            "x" * 600)
+
+# K_V and K_T are excluded: P.parse() rejects a bad version or a non-int
+# type outright, so fuzzing them would test the parser, not the boundary.
+# K_DST and the extension key 64 are in deliberately -- neither is read by
+# _on_packet today, which is exactly what makes them stand in for the next
+# field somebody adds.
+_FUZZ_KEYS = (P.K_ID, P.K_TS, P.K_SRC, P.K_ROOM, P.K_BODY, P.K_NICK,
+              P.K_DST, 64)
+
+# The WELCOME body is a NESTED map whose keys are read exactly the way the
+# envelope's are, so they are fuzzed the same way -- and this is not
+# belt-and-braces, it is a hole the first draft of this test actually had.
+# A hostile K_BODY of {"k": 1} is a dict, so it survives the
+# isinstance(body, dict) guard, but B_WELCOME_HUB is key 0, so
+# body.get(B_WELCOME_HUB) just returns None: the sweep never produced a
+# hostile hub name at all, and the hub-name boundary was uncovered while
+# the test still printed "ok". Proven by the neutering run in the report --
+# that site alone came back GREEN until these were added.
+_WELCOME_KEYS = (P.B_WELCOME_HUB, P.B_WELCOME_VER, P.B_WELCOME_CAPS,
+                 P.B_WELCOME_LIMITS)
+# Third level down: a limits map that IS a map but whose values are not
+# integers. That is Critical 2's exact shape ({L_MAX_BODY: "350"}), and a
+# sweep that only ever made _limits a non-dict would not reach it.
+_LIMIT_KEYS = (P.L_MAX_NICK, P.L_MAX_ROOM, P.L_MAX_BODY, P.L_MAX_ROOMS,
+               P.L_RATE)
+
+# The types whose handlers put something on screen. A hostile value only
+# proves anything if it reaches a renderer.
+_RENDER_TYPES = (P.T_WELCOME, P.T_JOINED, P.T_PARTED, P.T_MSG, P.T_NOTICE,
+                 P.T_ACTION, P.T_ERROR)
+
+_STATES = (rrc_client.CONNECTING, rrc_client.READY, rrc_client.JOINED)
+
+
+def _sweep_cases():
+    """(type, {key: hostile value}, state) tuples -- floor first, then tail."""
+    cases = []
+    for i in range(len(_FUZZ_KEYS)):
+        for j in range(len(_HOSTILE)):
+            for k in range(len(_RENDER_TYPES)):
+                # The state is rotated rather than drawn, so the floor stays
+                # a pure product: no seed touches it.
+                state = _STATES[(i + j + k) % len(_STATES)]
+                cases.append((_RENDER_TYPES[k],
+                              {_FUZZ_KEYS[i]: _HOSTILE[j]}, state))
+    for i in range(len(_WELCOME_KEYS)):
+        for j in range(len(_HOSTILE)):
+            cases.append((P.T_WELCOME,
+                          {P.K_BODY: {_WELCOME_KEYS[i]: _HOSTILE[j]}},
+                          _STATES[(i + j) % len(_STATES)]))
+    for i in range(len(_LIMIT_KEYS)):
+        for j in range(len(_HOSTILE)):
+            cases.append((P.T_WELCOME,
+                          {P.K_BODY: {P.B_WELCOME_LIMITS:
+                                      {_LIMIT_KEYS[i]: _HOSTILE[j]}}},
+                          _STATES[(i + j) % len(_STATES)]))
+    import random
+    rng = random.Random(_SWEEP_SEED)
+    for _ in range(_SWEEP_COMBOS):
+        env = {}
+        for key in rng.sample(_FUZZ_KEYS, rng.randint(2, 4)):
+            env[key] = rng.choice(_HOSTILE)
+        if rng.random() < 0.5:           # half the tail carries a WELCOME body
+            body = {}
+            for key in rng.sample(_WELCOME_KEYS, rng.randint(1, 3)):
+                body[key] = rng.choice(_HOSTILE)
+            if rng.random() < 0.5:
+                body[P.B_WELCOME_LIMITS] = dict(
+                    (k, rng.choice(_HOSTILE))
+                    for k in rng.sample(_LIMIT_KEYS, rng.randint(1, 3)))
+            env[P.K_BODY] = body
+        cases.append((rng.choice(_RENDER_TYPES), env, rng.choice(_STATES)))
+    return cases
+
+
+def _exercise_every_ui_path(g):
+    """Every real path a hub value can travel once it is in UI state."""
+    import rrc_ui
+    g.state = U.STATE_RRC_CHAT
+    rrc_ui.draw_room(g)
+    g._rrc_panel = True
+    rrc_ui.draw_room(g)                      # with the member panel over it
+    g._rrc_panel = False
+    g.state = U.STATE_RRC_ROOMS
+    rrc_ui.draw_rooms(g)
+    g.state = U.STATE_RRC_CHAT
+    g.handle_key(b"\x17")                    # alt+w opens the panel
+    g._irq_down = 1
+    g.handle_trackball()                     # move the panel selection
+    g._irq_click = 1
+    g.handle_trackball()                     # click = mention insert
+    g._irq_up = 2
+    g.handle_trackball()                     # scroll the room back
+    g.handle_key(b"z")
+    g.handle_key(b"\r")                      # compose + send through say()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    g.draw_node_list()
+
+
+def _assert_ui_state_is_typed(g, case):
+    for kind, nick, text in g._rrc_lines:
+        assert nick is None or isinstance(nick, str), (case, "nick", nick)
+        assert isinstance(text, str), (case, "text", text)
+    for src, nick in g._rrc_roster:
+        assert isinstance(src, (bytes, bytearray)), (case, "src", src)
+        assert nick is None or isinstance(nick, str), (case, "roster", nick)
+    assert g._rrc_room is None or isinstance(g._rrc_room, str), \
+        (case, "room", g._rrc_room)
+    assert g._rrc_hub_name is None or isinstance(g._rrc_hub_name, str), \
+        (case, "hub name", g._rrc_hub_name)
+    assert isinstance(g._rrc_status, str), (case, "status", g._rrc_status)
+    assert isinstance(g._rrc_input, str), (case, "input", g._rrc_input)
+    cap = rrc_client.compose_cap()
+    assert isinstance(cap, int) and cap >= 0, (case, "cap", cap)
+    for src, _nick in g._rrc_roster:
+        assert isinstance(rrc_client.mention_for(src), str), (case, "mention")
+
+
+def test_no_hub_field_reaches_the_ui_untyped():
+    cases = _sweep_cases()
+    # Guard the guard: a shrinking case list would quietly stop covering
+    # things while still printing "ok".
+    expected = (len(_FUZZ_KEYS) * len(_HOSTILE) * len(_RENDER_TYPES)
+                + len(_WELCOME_KEYS) * len(_HOSTILE)
+                + len(_LIMIT_KEYS) * len(_HOSTILE)
+                + _SWEEP_COMBOS)
+    assert len(cases) == expected, (len(cases), expected)
+    for t, fields, state in cases:
+        g, link = _hub_driven_ui(state=state)
+        # A benign arrival first, so every case has a str nick already in the
+        # roster: the mixed-type comparison in _roster_changed()'s sort only
+        # exists when a hostile nick lands BESIDE a good one, and a sweep
+        # that never pairs them would miss it entirely.
+        _feed(P.T_JOINED, room="#varna", body=[b"\x11" * 16], nick="sam")
+        env = {P.K_V: P.RRC_VERSION, P.K_T: t, P.K_ID: b"\x01" * 8,
+               P.K_TS: 0, P.K_SRC: b"\xaa" * 16}
+        env.update(fields)
+        rrc_client._on_packet(C.dumps(env))
+        _exercise_every_ui_path(g)
+        _assert_ui_state_is_typed(g, (t, sorted(fields)))
+    print("ok test_no_hub_field_reaches_the_ui_untyped (%d cases)" % len(cases))
+
+
 if __name__ == "__main__":
     for name in list(globals()):
         if name.startswith("test_"):
