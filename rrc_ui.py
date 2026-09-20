@@ -8,27 +8,53 @@
 # The client interprets structured fields; everything the hub says in
 # prose is painted as prose. That is why there is no parser here.
 
-from ui import (BODY_Y, CACHE_ROWS, CHAR_H, CHAR_W, COLS, INPUT_Y, SCREEN_W,
-                BODY_ROWS, STATE_NODES, STATE_RRC_CHAT, STATE_RRC_ROOMS,
-                TAB_RRC, _pad, _ascii)
+from ui import (UI, BODY_Y, CACHE_ROWS, CHAR_H, CHAR_W, COLS, INPUT_Y,
+                SCREEN_W, BODY_ROWS, STATE_NODES, STATE_RRC_CHAT,
+                STATE_RRC_ROOMS, TAB_RRC, _pad, _ascii, _ascii_keep_spacing)
 # SCREEN_H and SEP_Y are unused here.
 
 import rrc_proto as _P      # constants only -- for the composer's fallback cap
+
+
+def open_hub(ui, dest):
+    """Open the hub console for dest and ask the client to connect.
+
+    Every field of the previous session is reset here, not just the three
+    that were: a stale scroll anchor opened hub B's console part-way up an
+    empty buffer, the header showed hub A's name until B's WELCOME landed,
+    alt+w showed A's roster, the status line showed A's last message and a
+    half-typed composer line carried over into a different room.
+
+    The client's connect() tears down any live session rather than
+    refusing, so committing the UI here is safe: the two cannot end up
+    describing different hubs.
+    """
+    ui._rrc_lines = []
+    ui._rrc_flat = None
+    ui._rrc_room = None
+    ui._rrc_members = 0
+    ui._rrc_scroll_chat = 0
+    ui._rrc_hub_name = None
+    ui._rrc_roster = []
+    ui._rrc_status = ""
+    ui._rrc_input = ""
+    ui._rrc_prompt = False
+    ui._rrc_panel = False
+    ui._rrc_panel_idx = 0
+    ui._rrc_panel_scroll = 0
+    _invalidate_rows(ui)
+    ui.state = STATE_RRC_ROOMS
+    if ui.on_rrc_connect:
+        ui.on_rrc_connect(dest)
+    ui.dirty = True
+    return True
 
 
 def open_selected_hub(ui):
     """RRC tab click: connect to the highlighted hub."""
     if not ui._rrc_keys or not (0 <= ui._rrc_idx < len(ui._rrc_keys)):
         return False
-    dest = ui._rrc_keys[ui._rrc_idx]
-    ui._rrc_lines = []
-    ui._rrc_room = None
-    ui._rrc_members = 0
-    ui.state = STATE_RRC_ROOMS
-    if ui.on_rrc_connect:
-        ui.on_rrc_connect(dest)
-    ui.dirty = True
-    return True
+    return open_hub(ui, ui._rrc_keys[ui._rrc_idx])
 
 
 def _draw_header(ui, left, right):
@@ -45,8 +71,12 @@ def _draw_header(ui, left, right):
         ui.tft.text(ui.font, ui._tb(_ascii(left)[:COLS - len(right) - 3]),
                     CHAR_W, BODY_Y, ui.NEON_CYAN, ui.BG_DARK)
         if right:
+            # right is ui._rrc_status, which carries str(e) from a failed
+            # send or connect. Same glyph-index path as everything else on
+            # this row rather than a raw str straight at the driver.
             x = (COLS - len(right) - 1) * CHAR_W
-            ui.tft.text(ui.font, right, x, BODY_Y, ui.DIM_CYAN, ui.BG_DARK)
+            ui.tft.text(ui.font, ui._tb(right), x, BODY_Y, ui.DIM_CYAN,
+                        ui.BG_DARK)
     ui.tft.fill_rect(0, BODY_Y + CHAR_H - 1, SCREEN_W, 1, ui.DIM_CYAN)
 
 
@@ -58,39 +88,46 @@ def _line_color(ui, kind):
     return ui.NEON_CYAN
 
 
-def _wrap(text, width):
-    out = []
-    while len(text) > width:
-        cut = text.rfind(" ", 0, width)
-        if cut <= 0:
-            cut = width
-        out.append(text[:cut])
-        text = text[cut:].lstrip()
-    out.append(text)
-    return out
-
-
 def _wrap_line(kind, nick, text):
     """Wrap one scrollback entry into its display rows.
 
     Shared by _flatten() and ui.rrc_line()'s scroll anchor, so the nick
-    prefixes that decide a line's height live in exactly one place."""
+    prefixes that decide a line's height live in exactly one place.
+
+    _ascii_keep_spacing() rather than _ascii(): this is the one screen
+    whose whole job is rendering hub prose verbatim, and _ascii() is
+    ' '.join(raw.split()), which turns a hub's space-aligned "/list" table
+    into a single run-on line. Both drop control characters; only _ascii()
+    collapses the runs of spaces between columns. _draw_composer() makes
+    the same distinction for the same reason.
+
+    The wrapper is ui.UI._wrap_text -- the app's, not a second copy of it.
+    """
     body = text
     if kind == "msg" and nick:
         body = nick + "> " + text
     elif kind == "action" and nick:
         body = "* " + nick + " " + text
-    return _wrap(_ascii(body), COLS)
+    return UI._wrap_text(_ascii_keep_spacing(body), COLS)
 
 
 def _flatten(ui):
-    """Wrap every scrollback line to COLS, newest last. Shared by
-    _visible_lines (which windows it) and the trackball scroll clamp
-    (which only needs the total count)."""
-    flat = []
-    for kind, nick, text in ui._rrc_lines:
-        for piece in _wrap_line(kind, nick, text):
-            flat.append((kind, piece))
+    """Wrap every scrollback line to COLS, newest last, cached.
+
+    Shared by _visible_lines (which windows it) and the trackball scroll
+    clamp (which only needs the total count) -- and a five-tick trackball
+    drain called the clamp five times, then draw_room made it six, each
+    one re-wrapping all 120 entries inside a 50 ms redraw budget on a
+    device already paying ~220 us per composited cell. The scrollback only
+    changes in rrc_line() and open_hub(), and both drop the cache.
+    """
+    flat = ui._rrc_flat
+    if flat is None:
+        flat = []
+        for kind, nick, text in ui._rrc_lines:
+            for piece in _wrap_line(kind, nick, text):
+                flat.append((kind, piece))
+        ui._rrc_flat = flat
     return flat
 
 
@@ -303,6 +340,12 @@ PANEL_H = 158
 PANEL_ROWS = 7
 _PANEL_TEXT_X = PANEL_X + 8
 _PANEL_HASH_X = PANEL_X + PANEL_W - 8 - 10 * CHAR_W
+# Columns the nick may use before it runs into the [hash8] column, less one
+# for a separating space. Derived, not a fixed 20: _PANEL_HASH_X scales with
+# PANEL_W (and so with SCREEN_W) but a constant slice does not, and on the
+# Pro's 240px panel a 20-character name ran to x=176 over a hash column
+# starting at x=144.
+_PANEL_NAME_COLS = max(1, (_PANEL_HASH_X - _PANEL_TEXT_X) // CHAR_W - 1)
 
 
 def draw_member_panel(ui):
@@ -352,7 +395,7 @@ def draw_member_panel(ui):
         # A member who has never spoken is known only by hash -- the app's
         # existing convention for an unknown name is "?".
         name = _ascii(nick) if nick else "?"
-        ui.tft.text(ui.font, ui._tb(name[:20]), _PANEL_TEXT_X, y,
+        ui.tft.text(ui.font, ui._tb(name[:_PANEL_NAME_COLS]), _PANEL_TEXT_X, y,
                     ui.YELLOW if selected else ui.NEON_CYAN, bg)
         # [hash8] is hex from bytes.hex() -- always ASCII, so it
         # deliberately skips ui._tb() rather than being left out by

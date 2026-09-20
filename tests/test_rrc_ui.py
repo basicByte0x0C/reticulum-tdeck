@@ -4,6 +4,7 @@
 
 import os
 import sys
+import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -13,6 +14,56 @@ sys.path.insert(0, REPO)
 from test_ui_shell import _mkui as make_ui      # reuse the fake-display bootstrap
 
 import ui as U
+import rrc_cbor as C
+import rrc_client
+import rrc_proto as P
+
+
+class _FakeLink:
+    """Just enough link for compose_cap() and say()."""
+
+    def __init__(self):
+        self.mdu = 431
+        self.sent = []
+
+    def send(self, data):
+        self.sent.append(bytes(data))
+
+
+def _hub_driven_ui(state=None, room="#varna"):
+    """A real UI wired to the real rrc_client dispatcher.
+
+    Critical 1 is a data-flow defect: a hub value is type-checked at parse
+    and then trusted all the way into ui.draw(). Testing rrc_client with a
+    FakeGui cannot see it and testing rrc_ui with hand-written state cannot
+    either -- only the two joined up can. init() is bypassed because it
+    registers a urns announce handler; nothing else about the client is
+    faked.
+    """
+    g = make_ui()
+    rrc_client._gui = g
+    rrc_client._my_identity = types.SimpleNamespace(hash=b"\x69" * 16)
+    rrc_client._link = _FakeLink()
+    rrc_client._dest = b"\x42" * 16
+    rrc_client._state = rrc_client.JOINED if state is None else state
+    rrc_client._room = room
+    rrc_client._roster = {}
+    rrc_client._seen_ids = []
+    rrc_client._limits = {}
+    rrc_client._hub_name = None
+    rrc_client._banned = set()
+    rrc_client._backoff_until = 0
+    g.on_rrc_say = rrc_client.say
+    g.on_rrc_cap = rrc_client.compose_cap
+    g.on_rrc_mention = rrc_client.mention_for
+    g.node_name = "tdeck"
+    return g, rrc_client._link
+
+
+def _feed(t, **kw):
+    """Hand one hub packet to the real inbound dispatcher."""
+    kw.setdefault("src", b"\xaa" * 16)
+    rrc_client._on_packet(C.dumps(P.make_envelope(t, **kw)))
 
 
 def _painted(calls):
@@ -1122,6 +1173,486 @@ def test_composer_carries_a_cyrillic_mention_through_tb():
     g.tft.calls = []
     rrc_ui.draw_room(g)                       # must not raise
     print("ok test_composer_carries_a_cyrillic_mention_through_tb")
+
+
+# --- Critical 1: a hub value must never reach the draw path untyped --------
+#
+# gui_loop wraps the redraw in spi_acquire_display() with no try/except, so a
+# TypeError raised inside ui.draw() kills the task WHILE IT HOLDS THE DISPLAY
+# LOCK: the screen freezes permanently and the mutex leaks. Every test below
+# therefore drives the real dispatcher and then the real draw path, not the
+# module helpers in isolation.
+
+
+def test_a_bytes_nick_from_a_hub_cannot_kill_the_draw_task():
+    # _wrap_line does nick + "> " + text inside ui.draw().
+    g, link = _hub_driven_ui()
+    g.state = U.STATE_RRC_CHAT
+    _feed(P.T_MSG, src=b"\x55" * 16, room="#varna", body="anyone on 868?",
+          nick=b"\xff\xfe")
+    import rrc_ui
+    g.tft.calls = []
+    rrc_ui.draw_room(g)                          # must not raise
+    painted = _painted(g.tft.calls)
+    assert "anyone on 868?" in painted, painted  # the message still renders
+    print("ok test_a_bytes_nick_from_a_hub_cannot_kill_the_draw_task")
+
+
+def test_a_non_string_room_from_a_hub_cannot_kill_the_draw_task():
+    # rrc_joined(room) -> ui._rrc_room -> _ascii(room) in draw_room.
+    for bad in (12345, b"#varna", ["#varna"]):
+        g, link = _hub_driven_ui(state=rrc_client.READY)
+        _feed(P.T_JOINED, room=bad, body=[b"\x11" * 16])
+        assert g.state == U.STATE_RRC_CHAT, g.state
+        import rrc_ui
+        g.tft.calls = []
+        rrc_ui.draw_room(g)                      # must not raise
+    print("ok test_a_non_string_room_from_a_hub_cannot_kill_the_draw_task")
+
+
+def test_a_non_string_welcome_hub_name_cannot_kill_the_draw_task():
+    # _draw_header does left + "\x01" + right on the announced hub name.
+    for bad in (["evil"], 7, b"hub"):
+        g, link = _hub_driven_ui(state=rrc_client.CONNECTING)
+        _feed(P.T_WELCOME, body={P.B_WELCOME_HUB: bad})
+        assert g.state == U.STATE_RRC_ROOMS, g.state
+        import rrc_ui
+        g.tft.calls = []
+        rrc_ui.draw_rooms(g)                     # must not raise
+        painted = _painted(g.tft.calls)
+        assert "connecting..." in painted, painted   # falls back, not blank
+    print("ok test_a_non_string_welcome_hub_name_cannot_kill_the_draw_task")
+
+
+def test_a_bytes_nick_in_the_roster_cannot_kill_the_member_panel():
+    # Two arrivals: one named, one with a bytes nick. members.sort() raises
+    # on the mixed comparison before the panel even gets a chance to draw
+    # _ascii(nick).
+    g, link = _hub_driven_ui()
+    g.state = U.STATE_RRC_CHAT
+    _feed(P.T_JOINED, room="#varna", body=[b"\x11" * 16], nick="sam")
+    _feed(P.T_JOINED, room="#varna", body=[b"\x22" * 16], nick=b"\xff\xfe")
+    assert len(g._rrc_roster) == 2, g._rrc_roster
+    g._rrc_panel = True
+    import rrc_ui
+    g.tft.calls = []
+    rrc_ui.draw_room(g)                          # must not raise
+    painted = _painted(g.tft.calls)
+    assert "sam" in painted, painted
+    print("ok test_a_bytes_nick_in_the_roster_cannot_kill_the_member_panel")
+
+
+def test_a_bytes_nick_mention_cannot_kill_kbd_loop():
+    # mention_for() builds "@" + nick, and the whole click-to-mention path
+    # runs inside handle_trackball() -- the task that owns all input.
+    g, link = _hub_driven_ui()
+    g.state = U.STATE_RRC_CHAT
+    _feed(P.T_JOINED, room="#varna", body=[b"\x22" * 16], nick=b"\xff\xfe")
+    g.handle_key(b"\x17")                        # alt+w opens the panel
+    assert g._rrc_panel is True
+    g._irq_click = 1
+    g.handle_trackball()                         # must not raise
+    assert isinstance(g._rrc_input, str), g._rrc_input
+    import rrc_ui
+    g.tft.calls = []
+    rrc_ui.draw_room(g)                          # must not raise
+    print("ok test_a_bytes_nick_mention_cannot_kill_kbd_loop")
+
+
+# --- Critical 2: a non-integer hub limit must not kill the keyboard --------
+
+
+def test_a_string_body_limit_from_a_hub_cannot_kill_the_keyboard():
+    # rrc_ui._cap() wraps compose_cap() in try/except for drawing, but
+    # say() does not: enter on the composer runs UI.handle_key ->
+    # rrc_ui.handle_key -> on_rrc_say -> compose_cap -> min("350", 367),
+    # and the TypeError propagates all the way out into kbd_loop, taking
+    # the keyboard and the trackball with it.
+    g, link = _hub_driven_ui(state=rrc_client.CONNECTING)
+    _feed(P.T_WELCOME, body={P.B_WELCOME_HUB: "Evil Hub",
+                             P.B_WELCOME_LIMITS: {P.L_MAX_BODY: "350"}})
+    rrc_client._state = rrc_client.JOINED
+    g.state = U.STATE_RRC_CHAT
+    for c in "gm":
+        g.handle_key(c.encode())
+    g.handle_key(b"\r")                          # must not raise
+    assert link.sent, "the message never went out"
+    assert P.parse(link.sent[-1])[P.K_BODY] == "gm"
+    print("ok test_a_string_body_limit_from_a_hub_cannot_kill_the_keyboard")
+
+
+# --- Important 2: the scroll anchor must not climb past the scrollback -----
+
+
+def test_the_scroll_anchor_cannot_climb_past_the_scrollback():
+    # rrc_line() adds the new line's wrapped height to the anchor with no
+    # clamp. That is exact while the 120-line ring is filling, but once
+    # pop(0) starts the flattened length plateaus while the anchor keeps
+    # climbing: the view sticks on the OLDEST screen and _scroll_down needs
+    # one trackball tick per excess line to recover, with nothing on screen
+    # to say so.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(U.RRC_SCROLLBACK):
+        g.rrc_line("msg", "sam", "line %03d" % i)
+    g._irq_up = 4
+    g.handle_trackball()
+    assert g._rrc_scroll_chat == 4, g._rrc_scroll_chat
+    import rrc_ui
+    rows = U.BODY_ROWS - 1
+    for i in range(200):                    # well past the ring's capacity
+        g.rrc_line("msg", "sam", "more %03d" % i)
+        max_scroll = max(0, len(rrc_ui._flatten(g)) - rows)
+        assert g._rrc_scroll_chat <= max_scroll, \
+            (i, g._rrc_scroll_chat, max_scroll)
+    # ...and one tick down still moves the view, rather than burning 200
+    # ticks working off an anchor that was never reachable.
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    before = _painted(g.tft.calls)
+    g._irq_down = 1
+    g.handle_trackball()
+    g._cache = [''] * U.CACHE_ROWS
+    g.tft.calls = []
+    rrc_ui.draw_room(g)
+    assert _painted(g.tft.calls) != before, "one tick down did not move the view"
+    print("ok test_the_scroll_anchor_cannot_climb_past_the_scrollback")
+
+
+# --- Important 3/4: opening a hub starts from a clean console --------------
+
+
+def test_opening_a_hub_resets_every_field_of_the_previous_session():
+    # open_selected_hub() reset _rrc_lines/_rrc_room/_rrc_members and
+    # nothing else, so hub B's console showed hub A's name until B's
+    # WELCOME landed, alt+w showed A's roster, and the view opened scrolled
+    # back against an empty buffer.
+    g = make_ui()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    g.add_rrc_hub(b"\x11" * 16, name="Hub A", hops=1)
+    g.add_rrc_hub(b"\x22" * 16, name="Hub B", hops=1)
+    connected = []
+    g.on_rrc_connect = lambda dest: connected.append(dest)
+    # ...a live session on hub A:
+    g._rrc_idx = 0
+    g._rrc_hub_name = "Hub A"
+    g._rrc_status = "linking..."
+    g._rrc_scroll_chat = 7
+    g._rrc_panel = True
+    g._rrc_panel_idx = 3
+    g._rrc_panel_scroll = 2
+    g._rrc_input = "half-typed"
+    g.rrc_members([(bytes([i]) * 16, "n%d" % i) for i in range(5)])
+    for i in range(20):
+        g.rrc_line("msg", "sam", "hub A line %d" % i)
+
+    g._rrc_idx = 1
+    import rrc_ui
+    rrc_ui.open_selected_hub(g)
+
+    assert connected == [b"\x22" * 16], connected
+    assert g._rrc_lines == [], g._rrc_lines
+    assert g._rrc_room is None, g._rrc_room
+    assert g._rrc_members == 0, g._rrc_members
+    assert g._rrc_scroll_chat == 0, g._rrc_scroll_chat
+    assert g._rrc_hub_name is None, g._rrc_hub_name
+    assert g._rrc_roster == [], g._rrc_roster
+    assert g._rrc_status == "", g._rrc_status
+    assert g._rrc_panel is False, g._rrc_panel
+    assert g._rrc_panel_idx == 0 and g._rrc_panel_scroll == 0
+    assert g._rrc_input == "", g._rrc_input
+    # The consequence, not just the fields: hub B's first notice is the one
+    # on screen, at the live tail.
+    g.rrc_line("notice", None, "Hub B MOTD")
+    g.tft.calls = []
+    rrc_ui.draw_rooms(g)
+    painted = _painted(g.tft.calls)
+    assert "Hub B MOTD" in painted, painted
+    assert "hub A line" not in painted, painted
+    assert "Hub A" not in painted, painted
+    print("ok test_opening_a_hub_resets_every_field_of_the_previous_session")
+
+
+def test_opening_a_second_hub_ends_the_first_session_through_the_real_click():
+    # Important 4 end to end: the click commits the UI to hub B, so the
+    # client has to accept it. With the old "busy - session in progress"
+    # refusal the user sat on an empty hub-B console while still joined to
+    # hub A, with A's traffic painting into it.
+    g, link = _hub_driven_ui()                   # JOINED to hub A
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    g.add_rrc_hub(b"\x22" * 16, name="Hub B", hops=1)
+    g._rrc_idx = 0
+    dialled = []
+    g.on_rrc_connect = lambda dest: (dialled.append(dest),
+                                     rrc_client.connect(dest))
+    created = []
+
+    import uasyncio
+    saved = getattr(uasyncio, "create_task", None)
+    uasyncio.create_task = lambda coro: created.append(coro)
+    try:
+        g._irq_click = 1
+        g.handle_trackball()                     # the real click path
+    finally:
+        if saved is None:
+            del uasyncio.create_task
+        else:
+            uasyncio.create_task = saved
+    assert dialled == [b"\x22" * 16], dialled
+    assert created, "no session task was started for hub B"
+    assert rrc_client.is_active() is False, "hub A's session survived the switch"
+    assert rrc_client._link is None
+    for coro in created:
+        coro.close()
+    print("ok test_opening_a_second_hub_ends_the_first_session_through_the_real_click")
+
+
+# --- Important 6: eviction must not move the selection to another hub ------
+
+
+def test_hub_eviction_keeps_the_selection_on_the_same_hub():
+    # _rrc_keys.pop(0) shifted every index down one while _rrc_idx stayed
+    # put, so the highlighted row silently became a different hub and the
+    # next click opened it.
+    g = make_ui()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    for i in range(U.MAX_RRC_HUBS):
+        g.add_rrc_hub(bytes([i]) * 16, name="hub%02d" % i, hops=1)
+    g._rrc_idx = 3
+    selected = g._rrc_keys[3]
+    g.add_rrc_hub(b"\xf0" * 16, name="newcomer", hops=1)   # forces an eviction
+    assert len(g._rrc_keys) == U.MAX_RRC_HUBS
+    assert selected in g._rrc_keys, "the selected hub itself was evicted"
+    assert g._rrc_keys[g._rrc_idx] == selected, \
+        "eviction moved the selection to a different hub"
+    connected = []
+    g.on_rrc_connect = lambda dest: connected.append(dest)
+    g._irq_click = 1
+    g.handle_trackball()
+    assert connected == [selected], connected
+    print("ok test_hub_eviction_keeps_the_selection_on_the_same_hub")
+
+
+def test_hub_eviction_drops_the_least_recently_seen_not_the_oldest_added():
+    # add_shell_node()'s shape: a hub that is still announcing must outlive
+    # one that went quiet, whatever order they were first heard in.
+    g = make_ui()
+    for i in range(U.MAX_RRC_HUBS):
+        g.add_rrc_hub(bytes([i]) * 16, name="hub%02d" % i, hops=1)
+    first = bytes([0]) * 16
+    quiet = bytes([1]) * 16
+    g.add_rrc_hub(first, name="hub00", hops=1)   # first-added, still announcing
+    g.add_rrc_hub(b"\xf0" * 16, name="newcomer", hops=1)
+    assert first in g.rrc_hubs, "a hub that is still announcing was evicted"
+    assert quiet not in g.rrc_hubs, (
+        "eviction was FIFO, not least-recently-seen")
+    assert len(g._rrc_keys) == len(g.rrc_hubs) == U.MAX_RRC_HUBS
+    print("ok test_hub_eviction_drops_the_least_recently_seen_not_the_oldest_added")
+
+
+# --- Minor 2: the panel's nick column must not run into the hash column ----
+
+
+def test_the_panel_nick_column_clears_the_hash_column_on_both_boards():
+    # _PANEL_HASH_X derives from PANEL_W (board-aware) but the nick was
+    # sliced to a fixed 20 characters. On the Pro (SCREEN_W 240) the name
+    # ran to x=176 while the hash column starts at 144.
+    import importlib
+    import rrc_ui
+    saved_w = U.SCREEN_W
+    try:
+        for screen_w in (320, 240):
+            U.SCREEN_W = screen_w
+            importlib.reload(rrc_ui)
+            g = make_ui()
+            g.state = U.STATE_RRC_CHAT
+            g._rrc_room = "#varna"
+            g._rrc_panel = True
+            g.rrc_members([(b"\x11" * 16, "n" * 40)])   # a nick far too long
+            g.tft.calls = []
+            rrc_ui.draw_member_panel(g)
+            name_call = [c for c in g.tft.calls
+                         if c[0] == "text" and c[2] == rrc_ui._PANEL_TEXT_X
+                         and c[3] > rrc_ui.PANEL_Y + 20][0]
+            end_x = name_call[2] + len(name_call[1]) * U.CHAR_W
+            assert end_x <= rrc_ui._PANEL_HASH_X, \
+                (screen_w, end_x, rrc_ui._PANEL_HASH_X)
+    finally:
+        U.SCREEN_W = saved_w
+        importlib.reload(rrc_ui)
+    print("ok test_the_panel_nick_column_clears_the_hash_column_on_both_boards")
+
+
+# --- Minor 3: (m) on the RRC tab has to do what the hint says --------------
+
+
+def test_m_on_the_rrc_tab_opens_manual_hash_entry_and_connects():
+    # The empty state says "(m) to enter a hash" but m was gated to TAB_SSH,
+    # so the key did nothing at all.
+    g = make_ui()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    connected = []
+    g.on_rrc_connect = lambda dest: connected.append(dest)
+    g.handle_key(b"m")
+    assert g._manual_hex is True, "the (m) hint still does nothing"
+    for c in "bb" * 16:
+        g.handle_key(c.encode())
+    g.draw_node_list()                     # the entry screen must render
+    g.handle_key(b"\r")
+    assert connected == [bytes([0xBB]) * 16], connected
+    assert g.state == U.STATE_RRC_ROOMS, g.state
+    assert g._manual_hex is False
+    print("ok test_m_on_the_rrc_tab_opens_manual_hash_entry_and_connects")
+
+
+def test_manual_entry_on_the_rrc_tab_never_starts_a_shell():
+    g = make_ui()
+    g.state = U.STATE_NODES
+    g.node_tab = U.TAB_RRC
+    connected = []
+    g.on_rrc_connect = lambda dest: connected.append(dest)
+    g.handle_key(b"m")
+    for c in "cc" * 16:
+        g.handle_key(c.encode())
+    g.handle_key(b"\r")
+    assert connected == [bytes([0xCC]) * 16], connected
+    assert g.connects == [], g.connects       # on_shell_connect must not fire
+    assert g._terminal is None
+    print("ok test_manual_entry_on_the_rrc_tab_never_starts_a_shell")
+
+
+def test_manual_entry_accepts_the_hex_digits_e_and_x_is_not_one():
+    # 'e' IS a hex digit, and UI.handle_key runs _bare_nav_key() before
+    # state dispatch: on a screen not "accepting text" a bare e is eaten as
+    # a scroll event and never reaches the hex buffer. Roughly seven in
+    # eight 16-byte hashes contain an 'e', so without this the manual entry
+    # is unusable -- on the RRC tab now and on the SSH tab all along.
+    for tab, expect in ((U.TAB_RRC, "rrc"), (U.TAB_SSH, "ssh")):
+        g = make_ui()
+        g.state = U.STATE_NODES
+        g._switch_tab(tab)
+        connected = []
+        g.on_rrc_connect = lambda dest: connected.append(dest)
+        g.handle_key(b"m")
+        for c in "ee" * 16:
+            g.handle_key(c.encode())
+        assert g._shell_hex.decode() == "ee" * 16, (expect, g._shell_hex)
+        assert (g._irq_up, g._irq_down) == (0, 0), (expect, g._irq_up, g._irq_down)
+        g.handle_key(b"\r")
+        if expect == "rrc":
+            assert connected == [bytes([0xEE]) * 16], connected
+        else:
+            assert g.connects[-1][0] == bytes([0xEE]) * 16, g.connects
+    print("ok test_manual_entry_accepts_the_hex_digits_e_and_x_is_not_one")
+
+
+def test_manual_entry_still_works_on_the_ssh_tab():
+    # The SSH tab's own manual entry must survive being generalised.
+    g = make_ui()
+    g._switch_tab(U.TAB_SSH)
+    g.handle_key(b"m")
+    assert g._manual_hex is True
+    for c in "aa" * 16:
+        g.handle_key(c.encode())
+    g.handle_key(b"\r")
+    assert g.connects and g.connects[-1][0] == bytes([0xAA] * 16)
+    assert g.state == U.STATE_SHELL
+    print("ok test_manual_entry_still_works_on_the_ssh_tab")
+
+
+# --- Minor 4: hub prose is rendered verbatim, spacing and all -------------
+
+
+def test_hub_prose_keeps_its_column_spacing_in_the_scrollback():
+    # _ascii() is ' '.join(raw.split()), so a hub's space-aligned /list
+    # table arrived as one run-on line -- on the one screen whose entire
+    # purpose is rendering hub prose verbatim. _draw_composer already uses
+    # _tb() rather than _ascii() for exactly this reason.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g.rrc_line("notice", None, "Registered public rooms:")
+    g.rrc_line("notice", None, "  #varna     12  Varna mesh")
+    g.rrc_line("notice", None, "  #dx         3  DX chat")
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_rooms(g)
+    painted = _painted(g.tft.calls)
+    assert "#varna     12  Varna mesh" in painted, painted
+    assert "#dx         3  DX chat" in painted, painted
+    print("ok test_hub_prose_keeps_its_column_spacing_in_the_scrollback")
+
+
+def test_control_characters_are_still_stripped_from_hub_prose():
+    # Preserving spacing must not preserve control bytes: the font has no
+    # glyphs for them and a raw \x1b could steer a terminal-ish driver.
+    g = make_ui()
+    g.state = U.STATE_RRC_ROOMS
+    g.rrc_line("notice", None, "ro\x00om\x1b[31m  spaced\ttab\nnewline")
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_rooms(g)
+    for c in g.tft.calls:
+        if c[0] != "text":
+            continue
+        s = c[1]
+        if isinstance(s, str):
+            s = s.encode("latin-1")
+        for b in s:
+            assert b >= 32, (b, c[1])
+    print("ok test_control_characters_are_still_stripped_from_hub_prose")
+
+
+# --- Minor 5: the flattened scrollback is cached, not rebuilt per tick -----
+
+
+def test_the_flattened_scrollback_is_not_rebuilt_on_every_trackball_tick():
+    # Each tick called _scroll_up, which ran _flatten() over all 120
+    # entries doing _ascii() and _wrap(); a five-tick drain did five full
+    # flattens and then draw_room did a sixth, inside a 50 ms redraw budget
+    # on a device already spending ~220 us per composited cell.
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    for i in range(U.RRC_SCROLLBACK):
+        g.rrc_line("msg", "sam", "line %03d" % i)
+    import rrc_ui
+    calls = [0]
+    real = rrc_ui._wrap_line
+
+    def counting(kind, nick, text):
+        calls[0] += 1
+        return real(kind, nick, text)
+
+    rrc_ui._wrap_line = counting
+    try:
+        rrc_ui.draw_room(g)                  # primes the cache
+        calls[0] = 0
+        g._irq_up = 5
+        g.handle_trackball()
+        rrc_ui.draw_room(g)
+        assert calls[0] == 0, (
+            "a five-tick drain plus a redraw re-wrapped %d entries" % calls[0])
+        # ...and the cache still follows the scrollback.
+        g.rrc_line("msg", "sam", "fresh")
+        assert ("msg", "sam> fresh") in rrc_ui._flatten(g)
+    finally:
+        rrc_ui._wrap_line = real
+    print("ok test_the_flattened_scrollback_is_not_rebuilt_on_every_trackball_tick")
+
+
+def test_rrc_ui_uses_the_wrapper_ui_already_has():
+    # rrc_ui._wrap() was a character-for-character duplicate of
+    # ui.UI._wrap_text().
+    import rrc_ui
+    assert not hasattr(rrc_ui, "_wrap"), "the duplicate wrapper is still here"
+    assert rrc_ui._wrap_line("notice", None, "x" * (U.COLS * 2 + 3)) == \
+        U.UI._wrap_text("x" * (U.COLS * 2 + 3), U.COLS)
+    print("ok test_rrc_ui_uses_the_wrapper_ui_already_has")
 
 
 if __name__ == "__main__":

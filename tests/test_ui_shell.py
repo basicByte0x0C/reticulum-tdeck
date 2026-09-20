@@ -107,7 +107,7 @@ def test_manual_hash_entry_connects():
     g = _mkui()
     g._switch_tab(ui.TAB_SSH)
     g.handle_key(b"m")
-    assert g._shell_manual
+    assert g._manual_hex
     _type(g, "aa" * 16)               # 32 hex chars
     g.handle_key(b"\r")
     assert g.connects and g.connects[-1][0] == bytes([0xAA] * 16)
@@ -124,7 +124,7 @@ def test_manual_bad_hash_rejected():
     _type(g, "ab")                    # too short
     g.handle_key(b"\r")
     assert not g.connects
-    assert g._shell_manual            # stays in entry mode
+    assert g._manual_hex            # stays in entry mode
     assert "bad hash" in (g._shell_status or "")
 
 
