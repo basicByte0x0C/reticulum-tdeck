@@ -15,12 +15,18 @@ STATE_IMAGE    = 3
 STATE_RECORDING = 4
 STATE_BROWSER  = 5
 STATE_SHELL    = 6
+STATE_RRC_ROOMS = 7
+STATE_RRC_CHAT  = 8
 
 # Node-screen tabs
 TAB_MSG = 0
 TAB_NET = 1
 TAB_SSH = 2
-N_TABS  = 3
+TAB_RRC = 3
+N_TABS  = 4
+
+MAX_RRC_HUBS = 16
+RRC_SCROLLBACK = 120      # lines kept per session, RAM only
 
 # Shell control-key menu (trackball-click overlay — needs no special keyboard
 # keys, which the T-Deck lacks: no Esc/Tab/Ctrl/~). (label, kind, payload).
@@ -191,11 +197,19 @@ _SLOT_MAP = dict(_CYR)
 _SLOT_MAP.update(_GFX)
 
 
-# Keep displayable chars (ASCII + mapped Cyrillic), collapse whitespace —
-# emoji/CJK removal leaves gaps
+# Keep displayable chars (ASCII + mapped Cyrillic) and drop everything else,
+# control codes included. Spacing is left exactly as the sender wrote it, so
+# this is the filter for prose that is meant to be rendered verbatim — a
+# hub's space-aligned "/list" table, say. _row() rstrips the tail, so trailing
+# padding costs nothing.
+def _ascii_keep_spacing(s):
+    return ''.join(c for c in s if 32 <= ord(c) < 127 or ord(c) in _CYR)
+
+
+# The same filter, then whitespace collapsed — for names and other single-line
+# labels, where emoji/CJK removal would otherwise leave gaps.
 def _ascii(s):
-    raw = ''.join(c for c in s if 32 <= ord(c) < 127 or ord(c) in _CYR)
-    return ' '.join(raw.split())
+    return ' '.join(_ascii_keep_spacing(s).split())
 
 # Pad string to exact width (no clearing needed)
 def _pad(s, width=COLS):
@@ -427,7 +441,10 @@ class UI:
         self._shell_keys = []    # ordered list of dest_hash_bytes
         self.ssh_idx = 0
         self.ssh_scroll = 0
-        self._shell_manual = False   # manual hex-entry sub-mode on the SSH tab
+        # Manual hex-entry sub-mode, shared by the SSH and RRC tabs: same
+        # 32-hex-char destination, same screen, same key handler; the tab in
+        # force decides what Enter opens.
+        self._manual_hex = False
         self._shell_hex = bytearray()
 
         # Shell session (STATE_SHELL)
@@ -635,6 +652,33 @@ class UI:
         self.on_shell_disconnect = None # () -> None — tear down the session
         self.on_shell_seed = None       # () -> None — populate shell_nodes from storage
         self.on_shell_resize = None     # (rows, cols) -> None
+        # RRC (Reticulum Relay Chat) callbacks (wired by tdeck_node.py)
+        self.on_rrc_connect = None      # (dest_hash) -> None
+        self.on_rrc_join = None         # (room, key) -> None
+        self.on_rrc_say = None          # (text) -> None
+        self.on_rrc_part = None         # () -> None
+        self.on_rrc_disconnect = None   # () -> None
+        self.on_rrc_seed = None         # () -> None
+        self.on_rrc_mention = None      # (identity_hash) -> "@token" string
+        self.on_rrc_cap = None          # () -> composer byte budget (int)
+
+        self.rrc_hubs = {}              # dest_hash -> {"name", "hops", "seen"}
+        self._rrc_keys = []             # hub order, newest announce last
+        self._rrc_idx = 0
+        self._rrc_scroll = 0
+        self._rrc_lines = []            # (kind, nick, text), RAM only
+        self._rrc_flat = None           # rrc_ui._flatten() cache; None = stale
+        self._rrc_scroll_chat = 0
+        self._rrc_input = ""
+        self._rrc_room = None
+        self._rrc_hub_name = None
+        self._rrc_members = 0
+        self._rrc_status = ""
+        self._rrc_panel = False         # member panel open (alt+w)
+        self._rrc_panel_idx = 0
+        self._rrc_panel_scroll = 0
+        self._rrc_roster = []           # [(identity_hash, nick_or_None), ...]
+        self._rrc_prompt = False
 
     # --- Screen power management ---
 
@@ -929,16 +973,35 @@ class UI:
 
     # --- Node list screen ---
 
-    def _draw_tab_bar(self):
-        """MSG/NET/SSH tab bar — first body row of the node screen."""
+    def _tab_labels(self):
+        """Tab labels sized to the panel.
+
+        The wide, padded form (" MSG(n) NET(n) RNSH(n) RRC(n) ") is 33
+        columns at the widest single-digit counts and still only 38 at two
+        digits, so the v1's 40 columns always fit it. The Pro's panel is
+        only 30 columns wide, which the wide form never fits, so narrow
+        panels fall back to a compact form that drops the padding, the
+        parentheses and the longer "RNSH" name. COLS is read here rather
+        than captured, since the Pro sets a different screen geometry at
+        import.
+        """
         un = 0
         for v in self.unread.values():
             un += v
-        tabs = (
-            " MSG(" + str(len(self._peer_keys)) + ("*" if un else "") + ") ",
-            " NET(" + str(len(self._node_keys)) + ") ",
-            " RNSH(" + str(len(self._shell_keys)) + ") ",
-        )
+        counts = (str(len(self._peer_keys)) + ("*" if un else ""),
+                  str(len(self._node_keys)),
+                  str(len(self._shell_keys)),
+                  str(len(self._rrc_keys)))
+        wide = (" MSG(" + counts[0] + ") ", " NET(" + counts[1] + ") ",
+                " RNSH(" + counts[2] + ") ", " RRC(" + counts[3] + ") ")
+        if sum(len(x) for x in wide) <= COLS:
+            return wide
+        return (" MSG" + counts[0], " NET" + counts[1],
+                " SSH" + counts[2], " RRC" + counts[3] + " ")
+
+    def _draw_tab_bar(self):
+        """MSG/NET/RNSH/RRC tab bar — first body row of the node screen."""
+        tabs = self._tab_labels()
         cache_key = str(self.node_tab) + "".join(tabs)
         if self._cache[1] == cache_key:
             return
@@ -1010,9 +1073,9 @@ class UI:
     def draw_node_list(self):
         self._draw_tab_bar()
         _rows = BODY_ROWS - 1
-        # SSH tab in manual-entry mode: a hex-address input instead of the list.
-        if self.node_tab == TAB_SSH and self._shell_manual:
-            self._draw_shell_manual()
+        # SSH/RRC tab in manual-entry mode: a hex-address input, not the list.
+        if self._manual_hex and self.node_tab in (TAB_SSH, TAB_RRC):
+            self._draw_manual_hex()
             return
         if self.node_tab == TAB_MSG:
             self._draw_list_rows(self._peer_keys, self.peers, self.node_scroll,
@@ -1026,7 +1089,13 @@ class UI:
                                  ("No nodes yet.", "Waiting for node announces..."))
             _total = len(self._node_keys)
             _scroll = self.net_scroll
-        else:
+        elif self.node_tab == TAB_RRC:
+            self._draw_list_rows(self._rrc_keys, self.rrc_hubs, self._rrc_scroll,
+                                 self._rrc_idx, False,
+                                 ("No RRC hubs.", "(m) to enter a hash"))
+            _total = len(self._rrc_keys)
+            _scroll = self._rrc_scroll
+        else:  # TAB_SSH
             self._draw_list_rows(self._shell_keys, self.shell_nodes, self.ssh_scroll,
                                  self.ssh_idx, False,
                                  ("No rnsh nodes.", "(m) to enter a hash"))
@@ -1098,6 +1167,16 @@ class UI:
                     if hops:
                         bits.append(str(hops) + "hp")
                     bits.append(_age(n.get("seen")))
+                    info = " ".join(bits)
+        elif self.node_tab == TAB_RRC:
+            if self._rrc_keys and self._rrc_idx < len(self._rrc_keys):
+                h = self.rrc_hubs.get(self._rrc_keys[self._rrc_idx])
+                if h:
+                    bits = []
+                    hops = h.get("hops")
+                    if hops:
+                        bits.append(str(hops) + "hp")
+                    bits.append(_age(h.get("seen")))
                     info = " ".join(bits)
         else:  # TAB_SSH
             if self._shell_keys and self.ssh_idx < len(self._shell_keys):
@@ -1646,6 +1725,23 @@ class UI:
             return True
         if self.state == STATE_RECORDING:
             return True
+        if self.state == STATE_RRC_CHAT:
+            # The room composer takes every letter, so e and x have to stay
+            # letters here: without this a bare 'e' was eaten as a scroll
+            # event before rrc_ui.handle_key() ever saw it, and "hex test"
+            # arrived as "h tst".
+            return True
+        if self.state == STATE_RRC_ROOMS:
+            # The hub console has no text field -- until (j) opens the
+            # room-name prompt, which does. Room names carry e and x
+            # (#mesh, #mesh-extra), so the prompt could not be typed at all.
+            return self._rrc_prompt
+        if self.state == STATE_NODES:
+            # The node list is pure navigation -- except in manual hex
+            # entry, where 'e' is a hex DIGIT. Roughly seven in eight
+            # 16-byte hashes contain one, and a bare e was being eaten as a
+            # scroll event before _handle_manual_hex_key() ever saw it.
+            return self._manual_hex
         if self.state == STATE_SETTINGS:
             return self._settings_page in self._TEXT_ENTRY_PAGES
         return False
@@ -1694,6 +1790,9 @@ class UI:
             return self._handle_key_browser(ch, key)
         elif self.state == STATE_SHELL:
             return self._handle_key_shell(ch, key)
+        elif self.state in (STATE_RRC_ROOMS, STATE_RRC_CHAT):
+            import rrc_ui
+            return rrc_ui.handle_key(self, ch, key)
         else:
             return self._handle_key_chat(ch, key)
 
@@ -1710,9 +1809,9 @@ class UI:
             self.dirty = True
 
     def _handle_key_nodes(self, ch, key):
-        # SSH manual hex-entry sub-mode captures all keys.
-        if self.node_tab == TAB_SSH and self._shell_manual:
-            return self._handle_shell_manual_key(ch, key)
+        # Manual hex-entry sub-mode captures all keys.
+        if self._manual_hex and self.node_tab in (TAB_SSH, TAB_RRC):
+            return self._handle_manual_hex_key(ch, key)
         if key == b'a' or key == b'A':
             if self.on_announce:
                 self.on_announce()
@@ -1730,8 +1829,8 @@ class UI:
             # keyboard fallback for trackball left/right tab switch
             self._switch_tab((self.node_tab + 1) % N_TABS)
             return True
-        elif (key == b'm' or key == b'M') and self.node_tab == TAB_SSH:
-            self._shell_manual = True
+        elif (key == b'm' or key == b'M') and self.node_tab in (TAB_SSH, TAB_RRC):
+            self._manual_hex = True
             self._shell_hex = bytearray()
             self._cache = [''] * CACHE_ROWS
             self.dirty = True
@@ -1753,7 +1852,10 @@ class UI:
                 self._enter_chat()
             elif self.node_tab == TAB_NET:
                 self._open_selected_node()
-            else:
+            elif self.node_tab == TAB_RRC:
+                import rrc_ui
+                rrc_ui.open_selected_hub(self)
+            else:  # TAB_SSH
                 self._open_selected_shell()
             return True
         return False
@@ -1764,7 +1866,7 @@ class UI:
         if tab == self.node_tab:
             return
         self.node_tab = tab
-        self._shell_manual = False
+        self._manual_hex = False
         if tab == TAB_NET and self.on_net_seed:
             try:
                 self.on_net_seed()  # populate from persisted announces (once)
@@ -1773,6 +1875,11 @@ class UI:
         elif tab == TAB_SSH and self.on_shell_seed:
             try:
                 self.on_shell_seed()
+            except Exception:
+                pass
+        elif tab == TAB_RRC and self.on_rrc_seed:
+            try:
+                self.on_rrc_seed()
             except Exception:
                 pass
         self._cache = [''] * CACHE_ROWS  # rows, tab bar and footer all change
@@ -1856,14 +1963,23 @@ class UI:
         if self.on_shell_connect:
             self.on_shell_connect(dest_hash, cols, rows)
 
-    def _draw_shell_manual(self):
-        """SSH tab manual hex-entry screen."""
-        self._draw_row_cached(2, "rnsh listener hash:", BODY_Y + CHAR_H, self.NEON_CYAN)
+    def _draw_manual_hex(self):
+        """Manual hex-entry screen, for whichever of SSH/RRC is in force.
+
+        A destination hash is a destination hash: 16 bytes either way, and
+        the RRC tab's empty state has advertised "(m) to enter a hash"
+        since it landed. Only the label and the identity hint differ.
+        """
+        rrc = self.node_tab == TAB_RRC
+        self._draw_row_cached(2, "RRC hub hash:" if rrc else "rnsh listener hash:",
+                              BODY_Y + CHAR_H, self.NEON_CYAN)
         self._draw_row_cached(3, "(32 hex chars)", BODY_Y + 2 * CHAR_H, self.DIM_CYAN)
         for i in range(3, BODY_ROWS - 2):
             self._draw_row_cached(i + 1, "", BODY_Y + i * CHAR_H, self.NEON_CYAN)
-        # Show our identity hash — a listener authorizes it via -a / allowed_identities.
-        self._draw_row_cached(BODY_ROWS - 1, "your id (for listener -a):",
+        # Show our identity hash — a listener authorizes it via -a /
+        # allowed_identities, and an rrcd operator registers or bans by it.
+        self._draw_row_cached(BODY_ROWS - 1,
+                              "your id:" if rrc else "your id (for listener -a):",
                               BODY_Y + (BODY_ROWS - 2) * CHAR_H, self.DIM_CYAN)
         self._draw_row_cached(BODY_ROWS, self.my_identity_hash or "?",
                               BODY_Y + (BODY_ROWS - 1) * CHAR_H, self.NEON_GREEN)
@@ -1873,9 +1989,9 @@ class UI:
             self._cache[FOOT_SLOT] = foot
             self.tft.text(self.font, self._tb(_pad(foot)), 0, INPUT_Y, self.DIM_CYAN, self.BG_DARK)
 
-    def _handle_shell_manual_key(self, ch, key):
+    def _handle_manual_hex_key(self, ch, key):
         if ch == 0x1B:   # Esc — cancel
-            self._shell_manual = False
+            self._manual_hex = False
             self._cache = [''] * CACHE_ROWS
             self.dirty = True
             return True
@@ -1892,11 +2008,18 @@ class UI:
                 if len(dest) != 16:
                     raise ValueError
             except Exception:
-                self._shell_status = "bad hash (need 32 hex)"
+                if self.node_tab == TAB_RRC:
+                    self._rrc_status = "bad hash (need 32 hex)"
+                else:
+                    self._shell_status = "bad hash (need 32 hex)"
                 self.dirty = True
                 return True
-            self._shell_manual = False
-            self._start_shell(dest)
+            self._manual_hex = False
+            if self.node_tab == TAB_RRC:
+                import rrc_ui
+                rrc_ui.open_hub(self, dest)
+            else:
+                self._start_shell(dest)
             return True
         if 0x20 <= ch < 0x7F and len(self._shell_hex) < 32:
             c = chr(ch).lower()
@@ -1977,6 +2100,125 @@ class UI:
             self._shell_status = "disconnected — Esc to leave"
         if self.state == STATE_SHELL:
             self.dirty = True
+
+    # --- RRC (Reticulum Relay Chat) GUI API, called by rrc_client ---------
+
+    def add_rrc_hub(self, dest_hash, name=None, hops=None):
+        """Add or update a hub (RRC tab, called by rrc_client).
+
+        Eviction is least-recently-SEEN, like add_shell_node(): FIFO drops
+        a hub that is still announcing in favour of one that went quiet.
+        And the selection is carried across the eviction by identity --
+        pop(0) used to shift every index down one while _rrc_idx stayed
+        put, so the highlighted row silently became a different hub and the
+        next click opened that one instead.
+        """
+        entry = self.rrc_hubs.get(dest_hash)
+        if entry is None:
+            selected = (self._rrc_keys[self._rrc_idx]
+                        if 0 <= self._rrc_idx < len(self._rrc_keys) else None)
+            entry = {"name": name, "hops": hops, "seen": time.time()}
+            self.rrc_hubs[dest_hash] = entry
+            self._rrc_keys.append(dest_hash)
+            while len(self._rrc_keys) > MAX_RRC_HUBS:
+                oldest = min(self._rrc_keys,
+                             key=lambda k: self.rrc_hubs[k].get("seen", 0))
+                self.rrc_hubs.pop(oldest, None)
+                self._rrc_keys.remove(oldest)
+            if selected is not None and selected in self._rrc_keys:
+                self._rrc_idx = self._rrc_keys.index(selected)
+            elif self._rrc_idx >= len(self._rrc_keys):
+                self._rrc_idx = max(0, len(self._rrc_keys) - 1)
+            _max_scroll = max(0, len(self._rrc_keys) - (BODY_ROWS - 1))
+            if self._rrc_scroll > _max_scroll:
+                self._rrc_scroll = _max_scroll
+        else:
+            if name:
+                entry["name"] = name
+            if hops is not None:
+                entry["hops"] = hops
+            entry["seen"] = time.time()
+        self.dirty = True
+
+    def clear_rrc_hubs(self):
+        self.rrc_hubs = {}
+        self._rrc_keys = []
+        self._rrc_idx = 0
+        self._rrc_scroll = 0
+        self.dirty = True
+
+    def rrc_status(self, text):
+        self._rrc_status = text
+        self.dirty = True
+
+    def rrc_line(self, kind, nick, text):
+        self._rrc_lines.append((kind, nick, text))
+        while len(self._rrc_lines) > RRC_SCROLLBACK:
+            self._rrc_lines.pop(0)
+        self._rrc_flat = None            # the wrapped view is now stale
+        if self._rrc_scroll_chat > 0:
+            # The user is deliberately reading back. Snapping to the newest
+            # line here yanked them to the bottom on every arrival, which a
+            # busy room, a long /list reply or the MOTD burst makes constant
+            # -- the LXMF view only snaps for your own messages. Hold the
+            # anchor exactly instead: the window is measured back from the
+            # end (_visible_lines), so keeping the same rows on screen means
+            # adding the new line's *wrapped* height, not 1. That is exact
+            # whether or not the ring just evicted an older line, because
+            # eviction shifts the window and the content by the same amount
+            # -- until the ring is FULL. Then the flattened length plateaus
+            # while an unclamped anchor keeps climbing: the view sticks on
+            # the oldest screen, and _scroll_down needs one trackball tick
+            # per excess line to get back, with nothing on screen to say
+            # why. Clamp to the top of the scrollback.
+            import rrc_ui
+            anchor = self._rrc_scroll_chat + len(rrc_ui._wrap_line(kind, nick,
+                                                                   text))
+            top = max(0, len(rrc_ui._flatten(self)) - (BODY_ROWS - 1))
+            self._rrc_scroll_chat = max(0, min(anchor, top))
+        self.dirty = True
+
+    def rrc_roster(self, count):
+        self._rrc_members = count
+        self.dirty = True
+
+    def rrc_members(self, members):
+        """Roster snapshot: [(identity_hash, nick_or_None), ...]. The member
+        panel (rrc_ui.draw_member_panel) reads ui._rrc_roster directly; the
+        selection has to be re-clamped here too, or a roster that shrank
+        while the panel was open leaves _rrc_panel_idx pointing past the
+        end for the next draw.
+
+        The scroll offset is clamped against the top of the valid window
+        (len(members) - PANEL_ROWS), not against the selection index: a
+        mass PART can shrink the roster to fewer members than fit on
+        screen while idx and scroll are both still deep in a long list, and
+        clamping scroll to idx would leave it stranded above 0, hiding
+        members that now fit. Clamp scroll first, then idx, so both land
+        correctly regardless of which was further out of range."""
+        import rrc_ui
+        self._rrc_roster = members
+        self._rrc_members = len(members)
+        max_scroll = max(0, len(members) - rrc_ui.PANEL_ROWS)
+        if self._rrc_panel_scroll > max_scroll:
+            self._rrc_panel_scroll = max_scroll
+        if self._rrc_panel_idx >= len(members):
+            self._rrc_panel_idx = max(0, len(members) - 1)
+        self.dirty = True
+
+    def rrc_joined(self, room):
+        self._rrc_room = room
+        self.state = STATE_RRC_CHAT
+        self.dirty = True
+
+    def rrc_welcome(self, hub_name):
+        self._rrc_hub_name = hub_name
+        self.state = STATE_RRC_ROOMS
+        self.dirty = True
+
+    def rrc_closed(self):
+        self._rrc_room = None
+        self.dirty = True
 
     # --- Browser page view ---
 
@@ -3254,6 +3496,20 @@ class UI:
 
         self.wake_screen()
 
+        # The focused member panel (alt+w) takes the trackball entirely
+        # while open: scroll members, click to mention, no page/tab
+        # switching and no scrollback movement underneath it.
+        if self.state == STATE_RRC_CHAT and self._rrc_panel:
+            import rrc_ui
+            if up:
+                rrc_ui.panel_scroll(self, -up)
+            if down:
+                rrc_ui.panel_scroll(self, down)
+            if click:
+                rrc_ui.panel_click(self)
+            self.dirty = True
+            return True
+
         # Diagonal-roll jitter: the ball emits stray pulses on the other
         # axis — only the dominant axis of this drain cycle counts
         # (vertical wins ties: scrolling is the common gesture).
@@ -3299,7 +3555,10 @@ class UI:
                     self._enter_chat()
                 elif self.node_tab == TAB_NET:
                     self._open_selected_node()
-                elif self.node_tab == TAB_SSH and not self._shell_manual:
+                elif self.node_tab == TAB_RRC and not self._manual_hex:
+                    import rrc_ui
+                    rrc_ui.open_selected_hub(self)
+                elif self.node_tab == TAB_SSH and not self._manual_hex:
                     self._open_selected_shell()
             elif self.state == STATE_BROWSER:
                 self._browser_follow_cursor()
@@ -3343,6 +3602,11 @@ class UI:
                     self.net_idx -= 1
                     if self.net_idx < self.net_scroll:
                         self.net_scroll = self.net_idx
+            elif self.node_tab == TAB_RRC:
+                if self._rrc_idx > 0:
+                    self._rrc_idx -= 1
+                    if self._rrc_idx < self._rrc_scroll:
+                        self._rrc_scroll = self._rrc_idx
             else:  # TAB_SSH
                 if self.ssh_idx > 0:
                     self.ssh_idx -= 1
@@ -3363,7 +3627,20 @@ class UI:
                 self._shell_menu_move(-1)
             else:
                 self._shell_scroll(1)     # scroll terminal toward older output
-        else:
+        elif self.state in (STATE_RRC_CHAT, STATE_RRC_ROOMS):
+            # Covers both RRC screens that render through _visible_lines --
+            # the room view and the hub console (MOTD / "/list" replies,
+            # both routinely longer than one screen). Panel-open is handled
+            # earlier in handle_trackball and never reaches here. One tick
+            # = one wrapped line toward older scrollback, clamped so the
+            # window can't run past the top (same flatten _visible_lines
+            # uses, so the clamp matches what actually gets drawn).
+            import rrc_ui
+            rows = BODY_ROWS - 1
+            max_scroll = max(0, len(rrc_ui._flatten(self)) - rows)
+            if self._rrc_scroll_chat < max_scroll:
+                self._rrc_scroll_chat += 1
+        elif self.state == STATE_CHAT:
             # Move cursor up; scroll viewport when cursor reaches top
             _chat_rows = BODY_ROWS - 1
             if self.chat_cursor < 0:
@@ -3375,6 +3652,14 @@ class UI:
                 # never shrinks past the oldest full window)
                 if self.chat_scroll < max(0, len(self._build_chat_lines()) - _chat_rows):
                     self.chat_scroll += 1
+        else:
+            # A state that wants trackball scrolling must claim it above --
+            # this used to be a bare `else:` that silently meant "the LXMF
+            # chat view" (STATE_RRC_CHAT/STATE_RRC_ROOMS both fell into it
+            # in turn before they got their own branch). Doing nothing here
+            # is a screen that just doesn't scroll, which gets noticed;
+            # inheriting chat_cursor/chat_scroll doesn't.
+            pass
 
     def _scroll_down(self):
         if self.state == STATE_IMAGE:
@@ -3391,6 +3676,11 @@ class UI:
                     self.net_idx += 1
                     if self.net_idx >= self.net_scroll + _rows:
                         self.net_scroll = self.net_idx - _rows + 1
+            elif self.node_tab == TAB_RRC:
+                if self._rrc_idx < len(self._rrc_keys) - 1:
+                    self._rrc_idx += 1
+                    if self._rrc_idx >= self._rrc_scroll + _rows:
+                        self._rrc_scroll = self._rrc_idx - _rows + 1
             else:  # TAB_SSH
                 if self.ssh_idx < len(self._shell_keys) - 1:
                     self.ssh_idx += 1
@@ -3413,7 +3703,14 @@ class UI:
                 self._shell_menu_move(1)
             else:
                 self._shell_scroll(-1)    # scroll terminal toward newer output
-        else:
+        elif self.state in (STATE_RRC_CHAT, STATE_RRC_ROOMS):
+            # One tick = one wrapped line toward the newest message; 0 is
+            # the floor, and the only way back to it. rrc_line() no longer
+            # snaps here on arrival -- it holds the reader's anchor instead
+            # -- so this is what returns the view to the live tail.
+            if self._rrc_scroll_chat > 0:
+                self._rrc_scroll_chat -= 1
+        elif self.state == STATE_CHAT:
             # Move cursor down; scroll viewport when cursor reaches bottom
             _chat_rows = BODY_ROWS - 1
             if self.chat_cursor < 0:
@@ -3424,6 +3721,10 @@ class UI:
                 # Cursor at bottom — scroll viewport down
                 if self.chat_scroll > 0:
                     self.chat_scroll -= 1
+        else:
+            # A state that wants trackball scrolling must claim it above --
+            # see the matching comment in _scroll_up.
+            pass
 
     def _settings_scroll_up(self):
         if self._settings_page == _SET_MAIN:
@@ -3619,9 +3920,9 @@ class UI:
         self.dirty = True
 
     def delete_selected(self):
-        """Forget the selected peer (MSG) / node (NET) / listener (SSH) and its
-        local state. The entry re-appears on the next announce; this just clears
-        clutter."""
+        """Forget the selected peer (MSG) / node (NET) / hub (RRC) / listener
+        (SSH) and its local state. The entry re-appears on the next announce;
+        this just clears clutter."""
         if self.node_tab == TAB_MSG:
             if not (0 <= self.selected_idx < len(self._peer_keys)):
                 return
@@ -3648,6 +3949,15 @@ class UI:
                 self.net_idx = max(0, len(self._node_keys) - 1)
             if self.net_scroll > max(0, len(self._node_keys) - (BODY_ROWS - 1)):
                 self.net_scroll = max(0, len(self._node_keys) - (BODY_ROWS - 1))
+        elif self.node_tab == TAB_RRC:
+            if not (0 <= self._rrc_idx < len(self._rrc_keys)):
+                return
+            key = self._rrc_keys.pop(self._rrc_idx)
+            self.rrc_hubs.pop(key, None)
+            if self._rrc_idx >= len(self._rrc_keys):
+                self._rrc_idx = max(0, len(self._rrc_keys) - 1)
+            if self._rrc_scroll > max(0, len(self._rrc_keys) - (BODY_ROWS - 1)):
+                self._rrc_scroll = max(0, len(self._rrc_keys) - (BODY_ROWS - 1))
         else:  # TAB_SSH
             if not (0 <= self.ssh_idx < len(self._shell_keys)):
                 return
@@ -3848,6 +4158,12 @@ class UI:
             self.draw_browser()
         elif self.state == STATE_SHELL:
             self.draw_shell()
+        elif self.state == STATE_RRC_ROOMS:
+            import rrc_ui
+            rrc_ui.draw_rooms(self)
+        elif self.state == STATE_RRC_CHAT:
+            import rrc_ui
+            rrc_ui.draw_room(self)
         elif self.state == STATE_RECORDING:
             self._draw_recording()
         # Shared neon body frame — drawn last so corners stay crisp on every

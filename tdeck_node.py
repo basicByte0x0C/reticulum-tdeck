@@ -946,6 +946,7 @@ def tcp_toggle(enabled, host=None, port=None):
             _lxmf_to_peer.clear()
             nomad_browser.clear_nodes()
             rnsh_client.clear_nodes()
+            rrc_client.clear_hubs()
             Transport.register_interface(iface)
             _tcp_task = asyncio.create_task(iface.poll_loop())
             _tcp_iface = iface
@@ -975,6 +976,7 @@ def tcp_toggle(enabled, host=None, port=None):
             _lxmf_to_peer.clear()
             nomad_browser.clear_nodes()
             rnsh_client.clear_nodes()
+            rrc_client.clear_hubs()
             if DEBUG >= 1:
                 print("[TCP] Interface stopped")
             # Disconnect WiFi
@@ -1247,6 +1249,25 @@ gui.on_shell_input = rnsh_client.send_input
 gui.on_shell_disconnect = rnsh_client.disconnect
 gui.on_shell_resize = rnsh_client.resize
 gui.my_identity_hash = rns.identity.hexhash   # for a listener's allowed-identities list
+
+# --- RRC client (RRC tab) ---
+import rrc_client
+rrc_client.init(gui, rns.identity)
+gui.on_rrc_connect = rrc_client.connect
+gui.on_rrc_join = rrc_client.join
+gui.on_rrc_say = rrc_client.say
+gui.on_rrc_part = rrc_client.part
+gui.on_rrc_disconnect = rrc_client.disconnect
+gui.on_rrc_mention = rrc_client.mention_for
+# The composer's byte budget: the hub's WELCOME limit against the live link
+# MDU, recomputed per session rather than hardcoded as a column count.
+gui.on_rrc_cap = rrc_client.compose_cap
+# on_rrc_seed is deliberately left unassigned: hub discovery is
+# announce-driven from rrc_client.init() (a Transport announce handler
+# registered once at boot), so there is nothing to seed on tab switch --
+# same reasoning applies to on_net_seed/on_shell_seed, neither of which is
+# wired anywhere in this file either. ui.py guards the call site, so
+# leaving it unassigned is inert, not a bug.
 
 _MAX_REC_SECS = 15  # max recording duration
 _REC_CHUNK = 640    # samples per mic read (80ms) — larger chunks reduce GIL contention

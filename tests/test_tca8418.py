@@ -179,6 +179,55 @@ def test_alt_arrows():
               "got %r" % got)
 
 
+def test_alt_w_is_ctrl_w_for_the_rrc_member_panel():
+    """alt+w must reach rrc_ui.handle_key() as Ctrl-W, as it does on the v1.
+
+    The W slot's alt entry used to be None, and an empty alt entry falls back
+    to the base character (test_layer_fallback), so alt+w typed a literal 'w'
+    and the member panel -- along with click-to-mention -- had no way in on
+    this board at all. Pinning the byte here, rather than just "not b'w'",
+    is what keeps it equal to rrc_ui._ALT_W.
+    """
+    i2c, _, kb = new()
+    got = tap(i2c, kb, 29, 8)         # alt + w
+    check("alt+w emits Ctrl-W", got == bytes([tca8418.KEY_CTRL_W]), repr(got))
+    check("and that is the byte rrc_ui matches on",
+          tca8418.KEY_CTRL_W == 0x17)
+    i2c.press(8)
+    check("a bare w is still a w", kb.get_key() == b'w')
+    # board_tdeck_pro.get_key() consumes the arrow codes and the backlight
+    # toggle before the UI ever sees them, so a code that collided with one of
+    # those would be swallowed between this driver and rrc_ui. (The board
+    # module itself cannot be imported on the host -- it touches the panel and
+    # the radio -- so this pins the constants it filters on instead.)
+    check("Ctrl-W is not a code the board adapter swallows",
+          tca8418.KEY_CTRL_W not in (tca8418.KEY_UP, tca8418.KEY_DOWN,
+                                     tca8418.KEY_LEFT, tca8418.KEY_RIGHT,
+                                     tca8418.KEY_BL_TOGGLE))
+
+
+def test_no_two_keys_share_a_mapping():
+    """0x17 has to be unambiguous: it is now a UI binding, not just a byte
+    passed to a remote pty. Nothing else in the matrix may emit it, on any
+    layer -- and while checking that, catch any other collision too."""
+    seen = {}
+    dupes = []
+    for idx, layers in enumerate(tca8418._KEYMAP):
+        for layer, out in enumerate(layers):
+            if out is None:
+                continue
+            where = seen.get(out)
+            if where is not None:
+                dupes.append((out, where, (idx, layer)))
+            else:
+                seen[out] = (idx, layer)
+    check("no keystroke is produced by two different keys", not dupes,
+          repr(dupes))
+    check("Ctrl-W comes from exactly one key",
+          seen.get(bytes([tca8418.KEY_CTRL_W])) == (8, 3),
+          repr(seen.get(bytes([tca8418.KEY_CTRL_W]))))
+
+
 def test_modifier_expiry():
     i2c, _, kb = new()
     i2c.press(34)                     # shift
@@ -278,6 +327,8 @@ if __name__ == "__main__":
     test_shift_layer()
     test_sym_layer()
     test_alt_arrows()
+    test_alt_w_is_ctrl_w_for_the_rrc_member_panel()
+    test_no_two_keys_share_a_mapping()
     test_modifier_expiry()
     test_layer_fallback()
     test_modifier_toggle_off()
