@@ -694,7 +694,13 @@ async def _session_task(dest_hash, my_gen=None):
             return
 
         _status("identifying...")
-        link.set_packet_callback(_on_packet)
+        # urns defines set_packet_callback() on the INCOMING Link class only
+        # (link.py:591). OutgoingLink is a separate class with no inheritance:
+        # it honours the same attribute (set to None at :742, invoked at
+        # :1182) but exposes no setter, so calling one raises AttributeError
+        # before we ever identify -- the hub sees the link come up and then
+        # silently drops us, because rrcd ignores an unidentified link.
+        link.packet_callback = _on_packet
         link.identify(_my_identity)
         await asyncio.sleep_ms(200)
         if _stale(my_gen):

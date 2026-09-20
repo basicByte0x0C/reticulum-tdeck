@@ -649,8 +649,13 @@ class _FakeOutgoingLink:
     def send(self, data):
         self.sent.append(bytes(data))
 
-    def set_packet_callback(self, cb):
-        self.packet_callback = cb
+    # NO set_packet_callback here, deliberately. urns defines that setter on
+    # the INCOMING Link class only; OutgoingLink honours the attribute but
+    # exposes no setter. This fake used to provide one, which is why the
+    # suite happily green-lit a call that raised AttributeError on the first
+    # real connect. test_the_fake_link_cannot_outgrow_the_real_one keeps the
+    # two in step -- do not add a convenience method here without checking
+    # the real class has it.
 
     def identify(self, identity):
         self.identified = identity
@@ -1179,6 +1184,43 @@ def test_a_part_event_removes_only_the_mover():
     assert bystander in rrc_client._roster, \
         "a PART removed members that did not leave"
     print("ok test_a_part_event_removes_only_the_mover")
+
+
+
+def test_connect_binds_the_packet_callback_the_real_link_actually_reads():
+    # The first connect on hardware failed here: _session_task called
+    # link.set_packet_callback(), which OutgoingLink does not define, so it
+    # raised before identify() and the hub silently dropped an unidentified
+    # link. Bind the attribute urns' OutgoingLink.receive() reads instead.
+    g = _reset()
+    restore, _transport = _install_session_stubs()
+    try:
+        _FakeOutgoingLink.initial = _FakeOutgoingLink.ACTIVE
+        rrc_client._state = rrc_client.IDLE
+        rrc_client._link = None
+        coro = rrc_client._session_task(b"\x42" * 16)
+        _step(coro, 40)
+        link = _FakeOutgoingLink.instances[-1]
+        assert link.packet_callback is rrc_client._on_packet, link.packet_callback
+        assert link.identified is not None, "never identified"
+        assert link.sent, "no HELLO was sent"
+        env = P.parse(link.sent[0])
+        assert env[P.K_T] == P.T_HELLO, env[P.K_T]
+    finally:
+        restore()
+    print("ok test_connect_binds_the_packet_callback_the_real_link_actually_reads")
+
+
+def test_the_fake_link_cannot_outgrow_the_real_one():
+    # The bug above was invisible because the double implemented a method the
+    # real class lacks. Any future convenience added to the fake re-opens that
+    # hole, so pin the fake's surface against urns' actual OutgoingLink.
+    from urns.link import OutgoingLink as RealOutgoingLink
+    fake = set(n for n in dir(_FakeOutgoingLink) if not n.startswith("_"))
+    real = set(n for n in dir(RealOutgoingLink) if not n.startswith("_"))
+    extra = fake - real - {"instances", "initial"}
+    assert not extra, "fake OutgoingLink exposes what urns does not: " + repr(sorted(extra))
+    print("ok test_the_fake_link_cannot_outgrow_the_real_one")
 
 
 if __name__ == "__main__":
