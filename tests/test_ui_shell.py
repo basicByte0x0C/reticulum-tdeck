@@ -47,7 +47,10 @@ class FakeTFT:
         if isinstance(s, str):
             s.encode("ascii")
         assert 0 <= x <= 320 and 0 <= y <= 240, (x, y)
-        self.calls.append(("text", s, x, y))
+        # fg is appended rather than inserted: every existing reader indexes
+        # c[0]..c[3], so a fifth field lets a test assert a colour without
+        # touching them.
+        self.calls.append(("text", s, x, y, fg))
 
     def fill_rect(self, x, y, w, h, c):
         assert 0 <= x <= 320 and 0 <= y <= 240, (x, y)

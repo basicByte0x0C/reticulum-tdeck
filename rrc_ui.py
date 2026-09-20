@@ -343,6 +343,24 @@ def _cap(ui):
     return _P.DEFAULT_MAX_BODY
 
 
+def _member_count(ui):
+    """"12 users" when the roster is the room, "3+ users" when it is only
+    who we have seen, "? users" when we know nobody.
+
+    The RRC spec is explicit that "any member list provided by the hub is a
+    snapshot, not a promise", and rrcd leaves its JOINED member list off by
+    default -- so a bare number would be asserting something the protocol
+    never offers. The "+" is the difference between a count the hub backed
+    and a count we assembled from arrivals.
+    """
+    n = ui._rrc_members
+    if not n:
+        return "? users"
+    if getattr(ui, "_rrc_members_exact", False):
+        return "%d users" % n
+    return "%d+ users" % n
+
+
 def _hashed(room):
     """The room name as we show it: "#" + name, IRC style.
 
@@ -546,7 +564,7 @@ def draw_member_panel(ui):
     inventing data the protocol does not carry.
     """
     roster = ui._rrc_roster
-    _panel_chrome(ui, _hashed(ui._rrc_room), "%d users" % len(roster))
+    _panel_chrome(ui, _hashed(ui._rrc_room), _member_count(ui))
 
     top = ui._rrc_panel_scroll
     for i in range(PANEL_ROWS):
@@ -760,8 +778,12 @@ def panel_scroll(ui, delta):
 def draw_room(ui):
     """Room scrollback plus the composer."""
     room = _hashed(ui._rrc_room)
-    count = ("%d users" % ui._rrc_members) if ui._rrc_members else "? users"
-    name = _ascii(room)[:COLS - len(count) - 2]
+    count = _member_count(ui)
+    # One column of inset, and one fewer column to fill because of it: drawn
+    # at x=0 the name sat on the body frame's left rail. The console header
+    # gets the same clearance from its "<" glyph; this row has no glyph, so
+    # it pays for the space directly.
+    name = _ascii(room)[:COLS - len(count) - 3]
     # Cached like _draw_header/draw_browser's header -- the key covers
     # both the room name and the member count, so either changing repaints.
     cache_key = name + "\x01" + count
@@ -770,7 +792,12 @@ def draw_room(ui):
         ui.tft.text(ui.font, _pad(""), 0, BODY_Y, ui.NEON_CYAN, ui.BG_DARK)
         # room is hub-controlled (echoed by the JOIN reply); _tb() carries
         # it through the same glyph-index path _row() uses.
-        ui.tft.text(ui.font, ui._tb(name), 0, BODY_Y, ui.NEON_CYAN, ui.BG_DARK)
+        #
+        # YELLOW, not NEON_CYAN: the scrollback directly underneath is
+        # NEON_CYAN, so the heading was the same colour as the messages it
+        # was heading. The member panel already titles the room in YELLOW,
+        # so this is the colour the room name already has elsewhere.
+        ui.tft.text(ui.font, ui._tb(name), CHAR_W, BODY_Y, ui.YELLOW, ui.BG_DARK)
         ui.tft.text(ui.font, count, (COLS - len(count) - 1) * CHAR_W, BODY_Y,
                     ui.DIM_CYAN, ui.BG_DARK)
     ui.tft.fill_rect(0, BODY_Y + CHAR_H - 1, SCREEN_W, 1, ui.DIM_CYAN)

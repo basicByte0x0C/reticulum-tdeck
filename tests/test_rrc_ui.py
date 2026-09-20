@@ -531,7 +531,10 @@ def test_room_view_shows_room_and_member_count():
     g = make_ui()
     g.state = U.STATE_RRC_CHAT
     g._rrc_room = "#varna"
-    g._rrc_members = 12
+    # Through the setter, not the field: a count carries whether the hub
+    # backed it, and only a backed one prints bare. See
+    # test_the_member_count_says_whether_it_is_the_whole_room.
+    g.rrc_roster(12, True)
     g.tft.calls = []
     import rrc_ui
     rrc_ui.draw_room(g)
@@ -693,6 +696,87 @@ def test_panel_footer_names_a_key_that_exists():
     assert "alt+w" not in painted, painted
     assert "bksp close" in painted, painted
     print("ok test_panel_footer_names_a_key_that_exists")
+
+
+def test_the_member_count_says_whether_it_is_the_whole_room():
+    """The spec calls any member list "a snapshot, not a promise", and on a
+    default hub the roster is only who we watched arrive. A bare number
+    would assert something the protocol does not support."""
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    import rrc_ui
+
+    def _header():
+        g.tft.calls = []
+        g._cache = [''] * U.CACHE_ROWS      # the header row is cached
+        rrc_ui.draw_room(g)
+        return _painted(g.tft.calls)
+
+    g.rrc_roster(0, False)
+    assert "? users" in _header(), "nothing known yet"
+    g.rrc_roster(3, False)
+    assert "3+ users" in _header(), "partial: only who we saw"
+    g.rrc_roster(12, True)
+    assert "12 users" in _header(), "the hub told us the room"
+    print("ok test_the_member_count_says_whether_it_is_the_whole_room")
+
+
+def test_the_panel_title_agrees_with_the_header_count():
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.rrc_members([(b"\x11" * 6, "alice"), (b"\x22" * 6, None)])
+    g.rrc_roster(2, False)
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_member_panel(g)
+    painted = _painted(g.tft.calls)
+    assert "2+ users" in painted, painted
+    print("ok test_the_panel_title_agrees_with_the_header_count")
+
+
+def test_the_room_header_is_inset_and_reads_as_a_heading():
+    """It was drawn at x=0 in NEON_CYAN: jammed against the body frame rail,
+    and the same colour as the scrollback underneath it, so the room you are
+    in did not read as a heading. The member panel already titles the room in
+    YELLOW -- this matches it, and clears the rail by one column the way the
+    console header's "<" does."""
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#varna"
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)
+
+    def _s(c):
+        return c[1].decode("latin-1") if isinstance(c[1], (bytes, bytearray)) else c[1]
+
+    hits = [c for c in g.tft.calls if c[0] == "text" and _s(c).startswith("#varna")]
+    assert hits, g.tft.calls
+    x, fg = hits[0][2], hits[0][4]
+    assert x >= U.CHAR_W, "the name must clear the frame rail, got x=%d" % x
+    assert fg == g.YELLOW, "the room name must not be body-text coloured"
+    print("ok test_the_room_header_is_inset_and_reads_as_a_heading")
+
+
+def test_the_room_header_still_fits_beside_the_member_count():
+    """The inset costs a column, so the truncation has to lose one too or a
+    long room name runs under the count."""
+    g = make_ui()
+    g.state = U.STATE_RRC_CHAT
+    g._rrc_room = "#" + "x" * 60
+    g.rrc_roster(12)
+    g.tft.calls = []
+    import rrc_ui
+    rrc_ui.draw_room(g)
+    for c in g.tft.calls:
+        if c[0] != "text":
+            continue
+        s = c[1].decode("latin-1") if isinstance(c[1], (bytes, bytearray)) else c[1]
+        end = c[2] + len(s) * U.CHAR_W
+        assert end <= U.SCREEN_W, (s, c[2], end)
+    print("ok test_the_room_header_still_fits_beside_the_member_count")
 
 
 def test_the_picker_shows_rooms_irc_style_under_the_action_row():

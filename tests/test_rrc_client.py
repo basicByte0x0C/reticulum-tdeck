@@ -121,7 +121,7 @@ def _session(room="#varna"):
     g.joined = []
     g.welcomed = []
     g.rrc_line = lambda kind, nick, text: g.lines.append((kind, nick, text))
-    g.rrc_roster = lambda count: g.rosters.append(count)
+    g.rrc_roster = lambda count, exact=True: g.rosters.append(count)
     g.rrc_joined = lambda r: g.joined.append(r)
     g.rrc_welcome = lambda name: g.welcomed.append(name)
     link = FakeLink()
@@ -177,14 +177,17 @@ def test_duplicate_msg_id_is_rendered_once():
 def test_joined_body_seeds_the_roster():
     g, link = _session()
     rrc_client._state = rrc_client.READY          # we sent JOIN, not in yet
-    rrc_client._roster = {b"\x99" * 16: "stale"}  # left from a previous room
+    rrc_client._roster = {_rk(b"\x99" * 16): "stale"}  # left from a previous room
     members = [b"\x11" * 16, b"\x22" * 16, b"\x33" * 16]
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=b"\xaa" * 16, room="#varna", body=members)))
     assert rrc_client._state == rrc_client.JOINED
     assert g.joined == ["#varna"], g.joined
-    assert set(rrc_client._roster) == set(members), rrc_client._roster
-    assert b"\x99" * 16 not in rrc_client._roster, "stale member survived the reseed"
+    # Keys are the first 6 bytes: /who names a member by 12 hex and JOINED
+    # by the whole hash, and both must land on one entry. See
+    # test_a_who_prefix_and_a_later_full_hash_are_one_member.
+    assert set(rrc_client._roster) == set(m[:6] for m in members), rrc_client._roster
+    assert b"\x99" * 6 not in rrc_client._roster, "stale member survived the reseed"
     assert g.rosters[-1] == 3
     print("ok test_joined_body_seeds_the_roster")
 
@@ -218,11 +221,11 @@ def test_joined_event_adds_a_member_and_parted_removes_one():
     who = b"\x55" * 16
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=b"\xaa" * 16, room="#varna", body=[who], nick="sam")))
-    assert who in rrc_client._roster
+    assert _rk(who) in rrc_client._roster
     assert len(rrc_client._roster) == 1
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_PARTED, src=b"\xaa" * 16, room="#varna", body=[who], nick="sam")))
-    assert who not in rrc_client._roster
+    assert _rk(who) not in rrc_client._roster
     assert len(rrc_client._roster) == 0
     print("ok test_joined_event_adds_a_member_and_parted_removes_one")
 
@@ -233,10 +236,10 @@ def test_joined_event_never_adds_the_hub_to_the_roster():
     who = b"\x55" * 16
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=hub, room="#varna", body=[who], nick="sam")))
-    assert who in rrc_client._roster
-    assert hub not in rrc_client._roster, "K_SRC on JOINED is the hub, not a member"
+    assert _rk(who) in rrc_client._roster
+    assert _rk(hub) not in rrc_client._roster, "K_SRC on JOINED is the hub, not a member"
     assert len(rrc_client._roster) == 1, rrc_client._roster
-    assert rrc_client._roster[who] == "sam"
+    assert rrc_client._roster[_rk(who)] == "sam"
     print("ok test_joined_event_never_adds_the_hub_to_the_roster")
 
 
@@ -245,7 +248,7 @@ def test_nick_is_learned_from_incoming_messages():
     src = b"\x99" * 16
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_MSG, src=src, room="#varna", body="hi", nick="hilltop-rx")))
-    assert rrc_client._roster.get(src) == "hilltop-rx"
+    assert rrc_client._roster.get(_rk(src)) == "hilltop-rx"
     print("ok test_nick_is_learned_from_incoming_messages")
 
 
@@ -540,6 +543,169 @@ def test_the_room_list_is_captured_for_the_picker():
     print("ok test_the_room_list_is_captured_for_the_picker")
 
 
+def _rk(identity):
+    """The roster key for an identity: its first 6 bytes.
+
+    /who names a member by 12 hex characters and JOINED by the whole
+    16-byte hash; rrc_client truncates both so they are one entry.
+    """
+    return bytes(identity)[:6]
+
+
+def _fresh_join(room="varna", body=None):
+    """Join a room the way a client actually does: state READY, then the
+    hub's JOINED reply. _session() leaves us already JOINED, which is the
+    *arrival* path, not our own join."""
+    g, link = _session(room=None)
+    rrc_client._state = rrc_client.READY
+    rrc_client._room = None
+    rrc_client._roster = {}
+    link.sent = []
+    rrc_client._on_packet(_env(P.T_JOINED, room=room, body=body))
+    return g, link
+
+
+def _sent_bodies(link):
+    out = []
+    for raw in link.sent:
+        try:
+            out.append(P.parse(raw).get(P.K_BODY))
+        except Exception:
+            pass
+    return out
+
+
+def test_who_is_asked_when_the_hub_sends_no_member_list():
+    """The spec makes the JOINED member list optional -- "Presence is a
+    convenience, not a guarantee" -- and rrcd leaves it off by default, so
+    a client that only listens never learns who was already in the room."""
+    g, link = _fresh_join()
+    assert "/who varna" in _sent_bodies(link), _sent_bodies(link)
+    print("ok test_who_is_asked_when_the_hub_sends_no_member_list")
+
+
+def test_who_is_not_asked_when_the_hub_volunteers_the_list():
+    """A hub with include_joined_member_list set must not be asked again."""
+    g, link = _fresh_join(body=[b"\x11" * 16, b"\x22" * 16])
+    bodies = _sent_bodies(link)
+    assert not [b for b in bodies if isinstance(b, str) and b.startswith("/who")], bodies
+    assert len(rrc_client._roster) == 2, rrc_client._roster
+    print("ok test_who_is_not_asked_when_the_hub_volunteers_the_list")
+
+
+def test_the_who_reply_seeds_the_roster():
+    """rrcd builds "members in {room}: " + ", ".join(entries), each entry
+    "nick (12-hex)" or a bare full-length hex identity (commands.py)."""
+    g, link = _fresh_join()
+    rrc_client._on_packet(_env(
+        P.T_NOTICE,
+        body="members in varna: alice (aabbccddeeff), bob (112233445566), "
+             + "9f" * 16))
+    assert len(rrc_client._roster) == 3, rrc_client._roster
+    assert rrc_client._roster[bytes.fromhex("aabbccddeeff")] == "alice"
+    assert rrc_client._roster[bytes.fromhex("112233445566")] == "bob"
+    assert rrc_client._roster[bytes.fromhex("9f" * 6)] is None, "no nick to know"
+    print("ok test_the_who_reply_seeds_the_roster")
+
+
+def test_a_who_prefix_and_a_later_full_hash_are_one_member():
+    """/who gives 12 hex, JOINED gives the whole 16-byte hash, and both
+    name the same person. Roster keys are truncated so they collapse into
+    one entry instead of counting that member twice."""
+    g, link = _fresh_join()
+    rrc_client._on_packet(_env(P.T_NOTICE,
+                               body="members in varna: alice (aabbccddeeff)"))
+    assert len(rrc_client._roster) == 1
+    full = bytes.fromhex("aabbccddeeff") + b"\x77" * 10
+    rrc_client._on_packet(_env(P.T_JOINED, room="varna", body=[full], nick="alice"))
+    assert len(rrc_client._roster) == 1, rrc_client._roster
+    print("ok test_a_who_prefix_and_a_later_full_hash_are_one_member")
+
+
+def test_a_chunked_reply_without_the_header_still_seeds():
+    """queue_notice_chunks() splits an oversized notice at arbitrary
+    character positions with no continuation marker, so only the first
+    chunk carries the header. Entries are parsed independently."""
+    g, link = _fresh_join()
+    rrc_client._on_packet(_env(P.T_NOTICE,
+                               body="members in varna: alice (aabbccddeeff)"))
+    rrc_client._on_packet(_env(P.T_NOTICE,
+                               body="carol (334455667788), dave (99aabbccddee)"))
+    assert len(rrc_client._roster) == 3, rrc_client._roster
+    assert rrc_client._roster[bytes.fromhex("334455667788")] == "carol"
+    print("ok test_a_chunked_reply_without_the_header_still_seeds")
+
+
+def test_ordinary_hub_prose_seeds_nobody():
+    g, link = _fresh_join()
+    before = dict(rrc_client._roster)
+    rrc_client._on_packet(_env(P.T_NOTICE,
+                               body="room varna: registered; mode=+n; topic=(none)"))
+    rrc_client._on_packet(_env(P.T_NOTICE, body="welcome, behave yourself"))
+    assert rrc_client._roster == before, rrc_client._roster
+    print("ok test_ordinary_hub_prose_seeds_nobody")
+
+
+def test_member_entries_outside_the_ask_window_are_ignored():
+    """The harvest scans any notice while a /who is outstanding -- that is
+    what lets a chunked reply seed without the header. The window is the
+    only thing stopping a later hub notice that happens to carry an
+    identity from rewriting the room."""
+    g, link = _fresh_join()
+    rrc_client._who_until = 0          # nothing outstanding any more
+    before = dict(rrc_client._roster)
+    rrc_client._on_packet(_env(P.T_NOTICE,
+                               body="members in varna: mallory (deadbeef0000)"))
+    assert rrc_client._roster == before, rrc_client._roster
+    print("ok test_member_entries_outside_the_ask_window_are_ignored")
+
+
+def test_a_departure_with_no_body_is_removed_by_nick():
+    """On a default hub PARTED bodies are empty, so departures used to
+    linger forever -- the roster only ever grew."""
+    g, link = _fresh_join()
+    rrc_client._on_packet(_env(
+        P.T_NOTICE,
+        body="members in varna: alice (aabbccddeeff), bob (112233445566)"))
+    rrc_client._on_packet(_env(P.T_PARTED, room="varna", nick="alice"))
+    assert bytes.fromhex("aabbccddeeff") not in rrc_client._roster, rrc_client._roster
+    assert bytes.fromhex("112233445566") in rrc_client._roster
+    print("ok test_a_departure_with_no_body_is_removed_by_nick")
+
+
+def test_an_ambiguous_departure_removes_nobody():
+    """Two members wearing one nick: removing either would be a guess."""
+    g, link = _fresh_join()
+    rrc_client._on_packet(_env(
+        P.T_NOTICE,
+        body="members in varna: sam (aabbccddeeff), sam (112233445566)"))
+    rrc_client._on_packet(_env(P.T_PARTED, room="varna", nick="sam"))
+    assert len(rrc_client._roster) == 2, rrc_client._roster
+    print("ok test_an_ambiguous_departure_removes_nobody")
+
+
+def test_the_roster_reports_whether_it_is_the_whole_room():
+    """A count that cannot be backed must not look like one that can."""
+    seen = []
+    g, link = _session(room=None)
+    g.rrc_roster = lambda count, exact=True: seen.append((count, exact))
+    rrc_client._state = rrc_client.READY
+    rrc_client._room = None
+    rrc_client._roster = {}
+    rrc_client._on_packet(_env(P.T_JOINED, room="varna",
+                               body=[b"\x11" * 16, b"\x22" * 16]))
+    assert seen[-1] == (2, True), seen
+    seen[:] = []
+    rrc_client._state = rrc_client.READY
+    rrc_client._room = None
+    rrc_client._roster = {}
+    rrc_client._on_packet(_env(P.T_JOINED, room="varna"))
+    rrc_client._on_packet(_env(P.T_JOINED, room="varna", body=[b"\x33" * 16],
+                               nick="zoe"))
+    assert seen[-1] == (1, False), seen
+    print("ok test_the_roster_reports_whether_it_is_the_whole_room")
+
+
 def test_foreign_hub_prose_captures_no_rooms():
     """Same narrow guard as the "#" prefix: a hub that words its header
     differently degrades to an empty picker, never to a picker full of
@@ -598,7 +764,7 @@ def test_part_sends_part_and_returns_to_ready():
 
 def test_mention_uses_at_nick_when_unique():
     g, link = _session()
-    rrc_client._roster = {b"\x11" * 16: "sam", b"\x22" * 16: "kc1awv"}
+    rrc_client._roster = {_rk(b"\x11" * 16): "sam", _rk(b"\x22" * 16): "kc1awv"}
     assert rrc_client.mention_for(b"\x11" * 16) == "@sam"
     print("ok test_mention_uses_at_nick_when_unique")
 
@@ -606,10 +772,10 @@ def test_mention_uses_at_nick_when_unique():
 def test_mention_falls_back_to_hash_when_ambiguous_or_unknown():
     g, link = _session()
     dup = b"\x11" * 16
-    rrc_client._roster = {dup: "sam", b"\x22" * 16: "sam"}
+    rrc_client._roster = {_rk(dup): "sam", _rk(b"\x22" * 16): "sam"}
     assert rrc_client.mention_for(dup) == "@" + dup.hex()[:8]
     silent = b"\x33" * 16
-    rrc_client._roster[silent] = None
+    rrc_client._roster[_rk(silent)] = None
     assert rrc_client.mention_for(silent) == "@" + silent.hex()[:8]
     print("ok test_mention_falls_back_to_hash_when_ambiguous_or_unknown")
 
@@ -647,14 +813,14 @@ def test_hub_side_join_reply_is_read_as_our_own_join_not_an_arrival():
     # room -- every later send carried the wrong K_ROOM, the header lied and
     # the roster was polluted with the new room's members.
     g, link = _session(room="#varna")                # already JOINED
-    rrc_client._roster = {b"\x77" * 16: "oldtimer"}
+    rrc_client._roster = {_rk(b"\x77" * 16): "oldtimer"}
     members = [b"\x11" * 16, b"\x22" * 16]
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=b"\xaa" * 16, room="#other", body=members)))
     assert rrc_client._room == "#other", rrc_client._room
     assert g.joined == ["#other"], g.joined
-    assert set(rrc_client._roster) == set(members), rrc_client._roster
-    assert b"\x77" * 16 not in rrc_client._roster, "old room's roster survived"
+    assert set(rrc_client._roster) == set(_rk(m) for m in members), rrc_client._roster
+    assert _rk(b"\x77" * 16) not in rrc_client._roster, "old room's roster survived"
     # And the next message must carry the room we are actually in.
     g.node_name = "tdeck"
     rrc_client.say("gm")
@@ -667,14 +833,14 @@ def test_an_arrival_in_the_room_we_are_in_is_still_an_arrival():
     # we are JOINED is somebody else arriving, and must add to the roster
     # rather than clearing it and re-firing rrc_joined().
     g, link = _session(room="#varna")
-    rrc_client._roster = {b"\x77" * 16: "oldtimer"}
+    rrc_client._roster = {_rk(b"\x77" * 16): "oldtimer"}
     who = b"\x55" * 16
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=b"\xaa" * 16, room="#varna", body=[who], nick="sam")))
     assert g.joined == [], g.joined
     assert rrc_client._room == "#varna"
-    assert b"\x77" * 16 in rrc_client._roster, "an arrival wiped the roster"
-    assert rrc_client._roster[who] == "sam"
+    assert _rk(b"\x77" * 16) in rrc_client._roster, "an arrival wiped the roster"
+    assert rrc_client._roster[_rk(who)] == "sam"
     assert ("event", None, "* sam joined") in g.lines, g.lines
     print("ok test_an_arrival_in_the_room_we_are_in_is_still_an_arrival")
 
@@ -684,13 +850,13 @@ def test_an_arrival_without_a_room_field_is_not_mistaken_for_our_own_join():
     # have every arrival look like a join and wipe the roster -- the room
     # comparison only decides when the hub actually named a room.
     g, link = _session(room="#varna")
-    rrc_client._roster = {b"\x77" * 16: "oldtimer"}
+    rrc_client._roster = {_rk(b"\x77" * 16): "oldtimer"}
     who = b"\x55" * 16
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=b"\xaa" * 16, body=[who], nick="sam")))   # no K_ROOM
     assert g.joined == [], g.joined
     assert rrc_client._room == "#varna", rrc_client._room
-    assert b"\x77" * 16 in rrc_client._roster, "a roomless arrival wiped the roster"
+    assert _rk(b"\x77" * 16) in rrc_client._roster, "a roomless arrival wiped the roster"
     print("ok test_an_arrival_without_a_room_field_is_not_mistaken_for_our_own_join")
 
 
@@ -1140,7 +1306,7 @@ def test_a_non_string_nick_never_reaches_the_gui_or_the_roster():
             assert nick is None or isinstance(nick, str), (bad, nick)
             assert isinstance(text, str), (bad, text)
         for src in rrc_client._roster:
-            n = rrc_client._roster[src]
+            n = rrc_client._roster[_rk(src)]
             assert n is None or isinstance(n, str), (bad, n)
     print("ok test_a_non_string_nick_never_reaches_the_gui_or_the_roster")
 
@@ -1346,7 +1512,7 @@ def test_a_join_event_names_only_the_mover():
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_JOINED, src=b"\xaa" * 16, room="#varna",
         body=[mover, bystander], nick="sam")))
-    assert rrc_client._roster.get(mover) == "sam", rrc_client._roster
+    assert rrc_client._roster.get(_rk(mover)) == "sam", rrc_client._roster
     assert rrc_client._roster.get(bystander) is None, \
         "the mover's nick was stamped on another member"
     print("ok test_a_join_event_names_only_the_mover")
@@ -1360,7 +1526,7 @@ def test_a_part_event_removes_only_the_mover():
     rrc_client._on_packet(C.dumps(P.make_envelope(
         P.T_PARTED, src=b"\xaa" * 16, room="#varna",
         body=[mover, bystander], nick="sam")))
-    assert mover not in rrc_client._roster, rrc_client._roster
+    assert _rk(mover) not in rrc_client._roster, rrc_client._roster
     assert bystander in rrc_client._roster, \
         "a PART removed members that did not leave"
     print("ok test_a_part_event_removes_only_the_mover")

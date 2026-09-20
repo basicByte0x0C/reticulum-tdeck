@@ -144,7 +144,14 @@ _link = None
 _dest = None            # current hub identity hash being connected to
 _state = IDLE
 _room = None
-_roster = {}            # identity_hash -> nick or None
+_roster = {}            # identity_hash[:6] -> nick or None
+# Is _roster the room, or only who we happened to see? The spec is explicit
+# that "any member list provided by the hub is a snapshot, not a promise",
+# and on a default rrcd we get no list at all -- so the difference has to
+# reach the screen rather than be flattened into a confident number.
+_roster_exact = False
+_who_until = 0          # harvest /who entries from notices until this time
+WHO_WINDOW = 20         # seconds a /who reply is still expected
 _seen_ids = []          # recent K_IDs, newest last
 _limits = {}            # WELCOME limits map
 _hub_name = None
@@ -219,10 +226,29 @@ def _seen(mid):
     return False
 
 
+_KEY_LEN = 6
+
+
+def _key(src):
+    """Roster keys are the first 6 bytes of an identity.
+
+    /who names a member by 12 hex characters and JOINED by the whole
+    16-byte hash, and both mean the same person. Truncating every key to
+    the shorter of the two makes them one entry rather than two, which is
+    why seeding needs no reconciliation pass afterwards.
+
+    Safe for mentions: mention_for() emits 8 hex characters and the hub
+    matches "@nick or @<6+ hex of an identity hash>", so 6 bytes is one
+    byte more than it needs. A 48-bit collision inside a single chat room
+    is not a scale this protocol reaches.
+    """
+    return bytes(src)[:_KEY_LEN]
+
+
 def _remember(src, nick):
     if not isinstance(src, (bytes, bytearray)):
         return
-    src = bytes(src)
+    src = _key(src)
     if nick:
         _roster[src] = nick
     elif src not in _roster:
@@ -235,7 +261,7 @@ def _roster_changed():
     callers still depend on it firing every time the roster changes."""
     if _gui is None:
         return
-    _gui.rrc_roster(len(_roster))
+    _gui.rrc_roster(len(_roster), _roster_exact)
     members = []
     for src in _roster:
         members.append((src, _roster[src]))
@@ -283,7 +309,7 @@ def _dispatch(data):
     Structured fields only: every NOTICE the hub sends is rendered as
     text rather than parsed, because its wording is an unversioned
     formatting choice that differs between hub implementations."""
-    global _state, _limits, _hub_name, _backoff_until, _room
+    global _state, _limits, _hub_name, _backoff_until, _room, _roster_exact
 
     env = P.parse(data)
     if env is None:
@@ -359,14 +385,20 @@ def _dispatch(data):
             # The body is the room's entire member list, and there is no
             # nick -- it is not an arrival event.
             _roster.clear()
+            _roster_exact = False
             if isinstance(body, list):
                 for member in body:
                     _remember(member, None)
+                # A hub that volunteered the list has told us the room;
+                # one that sent an empty body has told us nothing.
+                _roster_exact = bool(_roster)
             if room:
                 _room = room          # adopt whatever the hub echoed
             _state = JOINED
             if _gui is not None:
                 _gui.rrc_joined(room)
+            if not _roster:
+                _ask_who()
         else:
             # Somebody else arrived. K_SRC is the hub; the body carries the
             # identity that actually joined, and K_NICK names it. rrcd
@@ -393,7 +425,22 @@ def _dispatch(data):
         if isinstance(body, list) and body:
             member = body[0]
             if isinstance(member, (bytes, bytearray)):
-                _roster.pop(bytes(member), None)
+                _roster.pop(_key(member), None)
+        elif nick:
+            # No body, which is what a default hub sends: the hash we would
+            # remove by is simply absent, and departures used to linger
+            # forever -- the roster only ever grew. The nick is still here,
+            # so remove the one member wearing it. When two wear the same
+            # nick, removing either would be a guess: remove neither, and
+            # let the count stop claiming to be the room.
+            same = []
+            for held in _roster:
+                if _roster[held] == nick:
+                    same.append(held)
+            if len(same) == 1:
+                _roster.pop(same[0], None)
+            elif same:
+                _roster_exact = False
         if nick:
             _line("event", None, "* " + nick + " left")
         _roster_changed()
@@ -409,6 +456,7 @@ def _dispatch(data):
 
     if t == P.T_NOTICE:
         if isinstance(body, str):
+            _harvest_members(body)
             _line("notice", None, _hash_room_list(body))
         return
 
@@ -424,6 +472,92 @@ def _dispatch(data):
         return
 
     # Unknown type: a future core message or an extension. Ignore it.
+
+
+WHO_HEADER = "members in "
+
+
+def _ask_who():
+    """Ask the hub who is in the room, because it did not volunteer them.
+
+    The RRC spec makes the JOINED member list optional -- "It may include a
+    list of current members, but it does not have to. Presence is a
+    convenience, not a guarantee" -- and rrcd leaves it off by default. A
+    client that only listens therefore learns nobody who was already there,
+    and (same config, empty PARTED bodies) never learns that anyone left.
+
+    /who is an rrcd extension rather than core RRC, so this is best-effort
+    by construction: a hub without it answers an error notice or nothing at
+    all, and we stay on what we can see. The room is named explicitly
+    because the command takes an optional room argument (commands.py) --
+    no need to rely on the hub's idea of where we are.
+    """
+    global _who_until
+    if _link is None or not _room or _my_identity is None:
+        return False
+    _who_until = time.time() + WHO_WINDOW
+    return _send_env(P.make_envelope(P.T_MSG, src=_my_identity.hash,
+                                     body="/who " + _room, nick=_nick()))
+
+
+def _unhex(text):
+    """The identity in a /who entry, or None if this is not an entry.
+
+    rrcd writes a nicked member as "nick (ident[:12])" and a nickless one
+    as the whole hex identity (commands.py), so only those two lengths are
+    entries. Anything else in a notice is prose.
+    """
+    n = len(text)
+    if n != 12 and n != 32:
+        return None
+    try:
+        return bytes.fromhex(text)
+    except Exception:
+        return None
+
+
+def _harvest_members(text):
+    """Seed the roster from an rrcd /who reply.
+
+    Entries, not lines. rrcd's queue_notice_chunks() splits an oversized
+    notice at arbitrary character positions and carries no continuation
+    marker, so only the first chunk holds the "members in <room>: " header.
+    Parsing each entry on its own means a chunked reply still seeds -- at
+    the cost of the single entry straddling each seam -- without holding
+    reassembly state that an unrelated notice could poison.
+
+    Only harvested inside the short window after we asked, so hub prose
+    that happens to look like an entry cannot rewrite the room.
+    """
+    global _roster_exact
+    if not _who_until or time.time() > _who_until:
+        return
+    if text.startswith(WHO_HEADER):
+        head = text.find(": ")
+        if head == -1:
+            return
+        text = text[head + 2:]
+    found = 0
+    for entry in text.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        nick = None
+        ident = entry
+        if entry.endswith(")"):
+            nick, _, ident = entry.partition("(")
+            nick = nick.strip()
+            ident = ident[:-1].strip()
+        src = _unhex(ident)
+        if src is None:
+            continue
+        _remember(src, nick or None)
+        found += 1
+    if found:
+        # The hub answered, so this is the room as the hub sees it -- a
+        # snapshot, which is all the spec ever promises.
+        _roster_exact = True
+        _roster_changed()
 
 
 LIST_HEADER = "Registered public rooms:"
@@ -499,7 +633,7 @@ def mention_for(identity_hash):
     The hub matches @nick or @<6+ hex of an identity hash>; a bare nick
     matches nothing, and an ambiguous @nick resolves to nobody at all.
     We hold the roster, so ambiguity is decidable here."""
-    src = bytes(identity_hash)
+    src = _key(identity_hash)
     nick = _roster.get(src)
     if nick:
         same = 0

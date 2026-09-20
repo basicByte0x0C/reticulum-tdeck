@@ -674,6 +674,7 @@ class UI:
         self._rrc_room = None
         self._rrc_hub_name = None
         self._rrc_members = 0
+        self._rrc_members_exact = False  # is the count the room, or just who we saw?
         self._rrc_status = ""
         self._rrc_panel = False         # a panel overlay is open (trackball click)
         self._rrc_panel_kind = "members"  # "members" in a room, "rooms" in the console
@@ -2183,8 +2184,16 @@ class UI:
             self._rrc_scroll_chat = max(0, min(anchor, top))
         self.dirty = True
 
-    def rrc_roster(self, count):
+    def rrc_roster(self, count, exact=True):
+        """Member count, and whether it is the room or only what we saw.
+
+        `exact` is defaulted so any caller predating the member panel keeps
+        working. rrc_client passes it from _roster_exact: True when the hub
+        volunteered its member list or answered /who, False when the roster
+        is just who we watched arrive.
+        """
         self._rrc_members = count
+        self._rrc_members_exact = exact
         self.dirty = True
 
     def rrc_rooms(self, rooms):
