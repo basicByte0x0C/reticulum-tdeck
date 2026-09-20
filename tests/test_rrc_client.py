@@ -251,17 +251,47 @@ def test_notice_renders_as_plain_text():
 
 def test_banned_error_closes_and_blocks_retry():
     g, link = _session()
+    rrc_client._dest = b"\x42" * 16
     rrc_client._on_packet(_env(P.T_ERROR, body="banned"))
-    assert rrc_client._no_retry is True
+    assert rrc_client.is_banned(b"\x42" * 16) is True
     assert ("error", None, "banned") in g.lines
     print("ok test_banned_error_closes_and_blocks_retry")
 
 
+def test_a_ban_is_scoped_to_the_hub_that_issued_it():
+    # Important 1: one flat _no_retry flag blocked connecting to EVERY hub
+    # until reboot, with a status line naming the wrong one. The spec scopes
+    # the ban to the banning hub.
+    g, link = _session()
+    banning = b"\x42" * 16
+    other = b"\x43" * 16
+    rrc_client._dest = banning
+    rrc_client._on_packet(_env(P.T_ERROR, body="banned"))
+    assert rrc_client.is_banned(banning) is True
+    assert rrc_client.is_banned(other) is False, \
+        "one hub's ban blocked every other hub"
+    print("ok test_a_ban_is_scoped_to_the_hub_that_issued_it")
+
+
+def test_a_ban_survives_for_the_rest_of_the_session():
+    # It must not be cleared by a later disconnect/connect cycle, or the
+    # client hammers a hub that has already said no.
+    g, link = _session()
+    banning = b"\x42" * 16
+    rrc_client._dest = banning
+    rrc_client._on_packet(_env(P.T_ERROR, body="banned"))
+    rrc_client.disconnect()
+    rrc_client.clear_hubs()
+    assert rrc_client.is_banned(banning) is True
+    print("ok test_a_ban_survives_for_the_rest_of_the_session")
+
+
 def test_rate_limited_error_sets_backoff():
     g, link = _session()
+    rrc_client._dest = b"\x42" * 16
     rrc_client._on_packet(_env(P.T_ERROR, body="rate limited"))
     assert rrc_client._backoff_until > 0
-    assert rrc_client._no_retry is False
+    assert rrc_client.is_banned(b"\x42" * 16) is False
     print("ok test_rate_limited_error_sets_backoff")
 
 
@@ -713,7 +743,7 @@ def _idle_session():
     g.welcomed = []
     rrc_client._link = None
     rrc_client._state = rrc_client.IDLE
-    rrc_client._no_retry = False
+    rrc_client._banned = set()
     rrc_client._backoff_until = 0
     return g
 
@@ -845,6 +875,310 @@ def test_drop_link_does_not_paint_an_abandoned_link_as_a_dropped_one():
     assert rrc_client._link is None
     assert not [ln for ln in g.lines if ln[0] == "error"], g.lines
     print("ok test_drop_link_does_not_paint_an_abandoned_link_as_a_dropped_one")
+
+
+# --- Critical 3: nothing oversized goes on air -----------------------------
+
+
+def test_say_never_puts_a_packet_bigger_than_the_mdu_on_air():
+    # Measured, not computed from a constant: room + nick + a max-length
+    # body encoded to 433 bytes against a 431-byte link MDU, and urns'
+    # OutgoingLink.send() has no MDU guard to catch it.
+    g, link = _session(room="#varna-mesh-chat")
+    g.node_name = "milen-tdeck-node"
+    rrc_client._limits = {P.L_MAX_BODY: 350}
+    rrc_client.say("x" * 350)
+    assert len(link.sent[-1]) <= link.mdu, (len(link.sent[-1]), link.mdu)
+    # ...and it still sent as much as it could, rather than collapsing.
+    assert len(P.parse(link.sent[-1])[P.K_BODY]) > 300
+    print("ok test_say_never_puts_a_packet_bigger_than_the_mdu_on_air")
+
+
+def test_the_echo_shows_exactly_what_went_on_the_wire():
+    # The local echo is the only confirmation the user gets; if the packet
+    # was trimmed to fit, the echo has to show the trimmed text.
+    g, link = _session(room="#varna-mesh-chat")
+    g.node_name = "milen-tdeck-node"
+    rrc_client._limits = {P.L_MAX_BODY: 350}
+    rrc_client.say("x" * 350)
+    assert P.parse(link.sent[-1])[P.K_BODY] == g.lines[-1][2], (
+        len(P.parse(link.sent[-1])[P.K_BODY]), len(g.lines[-1][2]))
+    print("ok test_the_echo_shows_exactly_what_went_on_the_wire")
+
+
+def test_a_huge_ping_body_is_ponged_without_overrunning_the_link():
+    # Everything from a hub is attacker-controlled, including the PING body
+    # the PONG echoes back.
+    g, link = _session()
+    rrc_client._on_packet(_env(P.T_PING, body=b"\xab" * 400))
+    assert len(link.sent) == 1, link.sent
+    assert len(link.sent[0]) <= link.mdu, len(link.sent[0])
+    assert P.parse(link.sent[0])[P.K_T] == P.T_PONG
+    print("ok test_a_huge_ping_body_is_ponged_without_overrunning_the_link")
+
+
+# --- Critical 2: a non-integer hub limit is not stored ---------------------
+
+
+def test_welcome_limits_that_are_not_integers_are_ignored_per_key():
+    g, link = _session()
+    rrc_client._state = rrc_client.CONNECTING
+    body = {P.B_WELCOME_HUB: "Evil Hub",
+            P.B_WELCOME_LIMITS: {P.L_MAX_BODY: "350", P.L_MAX_NICK: 32,
+                                 P.L_MAX_ROOM: None, P.L_RATE: [1]}}
+    rrc_client._on_packet(_env(P.T_WELCOME, body=body))
+    assert rrc_client._limits == {P.L_MAX_NICK: 32}, rrc_client._limits
+    # ...and the composer cap stays a usable integer.
+    cap = rrc_client.compose_cap()
+    assert isinstance(cap, int) and cap > 0, cap
+    print("ok test_welcome_limits_that_are_not_integers_are_ignored_per_key")
+
+
+def test_a_welcome_limits_map_that_is_not_a_map_is_ignored():
+    g, link = _session()
+    rrc_client._state = rrc_client.CONNECTING
+    rrc_client._on_packet(_env(P.T_WELCOME, body={P.B_WELCOME_LIMITS: [1, 2]}))
+    assert rrc_client._limits == {}, rrc_client._limits
+    print("ok test_a_welcome_limits_map_that_is_not_a_map_is_ignored")
+
+
+# --- Critical 1: no hub value leaves the client untyped --------------------
+#
+# The UI-side half of this lives in test_rrc_ui.py, where a real UI and the
+# real draw path are available. These pin the client boundary itself.
+
+
+def test_a_non_string_nick_never_reaches_the_gui_or_the_roster():
+    g, link = _session()
+    # (A float is not in this list because rrc_cbor cannot encode one --
+    # its decoder skips floats to None, so one never reaches a nick at all.)
+    for bad in (b"\xff\xfe", 12345, ["nick"], {"n": 1}, True):
+        g.lines = []
+        rrc_client._roster = {}
+        rrc_client._on_packet(C.dumps(P.make_envelope(
+            P.T_MSG, src=b"\x55" * 16, room="#varna", body="hi", nick=bad)))
+        for kind, nick, text in g.lines:
+            assert nick is None or isinstance(nick, str), (bad, nick)
+            assert isinstance(text, str), (bad, text)
+        for src in rrc_client._roster:
+            n = rrc_client._roster[src]
+            assert n is None or isinstance(n, str), (bad, n)
+    print("ok test_a_non_string_nick_never_reaches_the_gui_or_the_roster")
+
+
+def test_a_non_string_nick_on_a_join_event_does_not_raise():
+    # "* " + nick + " joined" was a straight concatenation of a hub value.
+    g, link = _session()
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_JOINED, src=b"\xaa" * 16, room="#varna", body=[b"\x55" * 16],
+        nick=b"\xff\xfe")))
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_PARTED, src=b"\xaa" * 16, room="#varna", body=[b"\x55" * 16],
+        nick=b"\xff\xfe")))
+    for kind, nick, text in g.lines:
+        assert isinstance(text, str), text
+    print("ok test_a_non_string_nick_on_a_join_event_does_not_raise")
+
+
+def test_a_mixed_type_roster_still_sorts_for_the_member_panel():
+    # _roster_changed() sorts on (nick is None, nick.lower()); one bytes
+    # nick beside one str nick raised TypeError on the comparison, in the
+    # task that owns the display.
+    g, link = _session()
+    hub = b"\xaa" * 16
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_JOINED, src=hub, room="#varna", body=[b"\x11" * 16], nick="sam")))
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_JOINED, src=hub, room="#varna", body=[b"\x22" * 16],
+        nick=b"\xff\xfe")))
+    snap = g.members[-1]
+    assert len(snap) == 2, snap
+    for src, nick in snap:
+        assert isinstance(src, (bytes, bytearray)), src
+        assert nick is None or isinstance(nick, str), nick
+    print("ok test_a_mixed_type_roster_still_sorts_for_the_member_panel")
+
+
+def test_a_non_string_room_never_reaches_the_gui_or_the_wire():
+    for bad in (12345, b"#varna", ["#varna"], {"r": 1}):
+        g, link = _session(room="#varna")
+        rrc_client._state = rrc_client.READY          # we sent JOIN
+        rrc_client._on_packet(C.dumps(P.make_envelope(
+            P.T_JOINED, src=b"\xaa" * 16, room=bad, body=[b"\x11" * 16])))
+        assert g.joined == [None], (bad, g.joined)
+        assert rrc_client._room is None or isinstance(rrc_client._room, str)
+    print("ok test_a_non_string_room_never_reaches_the_gui_or_the_wire")
+
+
+def test_a_non_string_welcome_hub_name_never_reaches_the_gui():
+    for bad in (["evil"], 7, b"hub", {"h": 1}):
+        g, link = _session()
+        rrc_client._state = rrc_client.CONNECTING
+        rrc_client._on_packet(_env(P.T_WELCOME, body={P.B_WELCOME_HUB: bad}))
+        assert g.welcomed == [None], (bad, g.welcomed)
+    print("ok test_a_non_string_welcome_hub_name_never_reaches_the_gui")
+
+
+def test_mention_for_always_returns_a_string():
+    g, link = _session()
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_MSG, src=b"\x55" * 16, room="#varna", body="hi", nick=b"\xff")))
+    token = rrc_client.mention_for(b"\x55" * 16)
+    assert isinstance(token, str), token
+    print("ok test_mention_for_always_returns_a_string")
+
+
+# --- Important 4/5: one session at a time, and switching away ends it ------
+
+
+def test_connecting_to_a_second_hub_replaces_the_live_session():
+    # rrc_ui.open_selected_hub() commits the UI to the new hub before this
+    # runs, so refusing would leave the user on an empty hub-B console while
+    # hub A's traffic painted into it.
+    g, link = _session()                      # JOINED to hub A
+    restore, transport = _install_session_stubs()
+    started = []
+    sys.modules["uasyncio"].create_task = lambda coro: started.append(coro)
+    try:
+        rrc_client.connect(b"\x43" * 16)
+        assert link.torn_down is True, "the first session survived the switch"
+        assert rrc_client._link is None
+        assert rrc_client.is_active() is False
+        # ...and the new session is actually accepted, not refused as busy.
+        assert len(started) == 1, started
+        _step(started[0], 1)
+        assert rrc_client._state == rrc_client.CONNECTING, rrc_client._state
+        assert rrc_client._dest == b"\x43" * 16, rrc_client._dest
+        assert not any("busy" in s for s in g.status), g.status
+        started[0].close()
+    finally:
+        restore()
+    print("ok test_connecting_to_a_second_hub_replaces_the_live_session")
+
+
+def test_clear_hubs_disconnects_the_live_session():
+    # Important 5: after a LoRa<->TCP switch the link survives on a
+    # deregistered interface -- say() still believes it is JOINED and the
+    # hub keeps paying keepalive airtime. rnsh_client.clear_nodes()
+    # disconnects first; this did not.
+    g, link = _session()
+    rrc_client.clear_hubs()
+    assert link.torn_down is True, "the link survived the interface switch"
+    assert rrc_client._link is None
+    assert rrc_client.is_active() is False
+    assert g.cleared == 1, g.cleared
+    print("ok test_clear_hubs_disconnects_the_live_session")
+
+
+# --- Important 7: a stale task must not clobber the newer session ----------
+
+
+def test_a_stale_task_that_raises_does_not_kill_the_newer_session():
+    # Every other exit in _session_task checks _stale() first; the except
+    # handler did not. An old task raising after a newer one started set
+    # _link = None and _state = CLOSED, silently killing the NEW session and
+    # leaking its link -- never torn down, still open on the hub.
+    # The stepper is single-threaded, so the takeover is staged from inside
+    # the call that raises: Transport.hops_to() runs in the straight-line
+    # prelude, after the path wait's _stale() check and before the next one,
+    # which is exactly the window the defect lives in. What is under test is
+    # the ORDER -- a newer session owns _link and _state by the time the old
+    # task's exception reaches the handler -- not how the two interleaved.
+    g = _idle_session()
+    restore, transport = _install_session_stubs(path_found_after=1)
+    try:
+        newlink = FakeLink()
+
+        def _takeover_then_boom(h):
+            rrc_client._task_gen_next()          # what connect()/disconnect() do
+            rrc_client._link = newlink
+            rrc_client._state = rrc_client.JOINED
+            raise OSError("radio busy")
+
+        transport.hops_to = staticmethod(_takeover_then_boom)
+        coro = rrc_client._session_task(b"\x42" * 16)
+        _step(coro, 1)                  # parked in the path wait
+        status_before = len(g.status)
+        assert _step(coro, 20), "the stale task kept running"
+        assert rrc_client._link is newlink, "a stale task cleared the new link"
+        assert rrc_client._state == rrc_client.JOINED, rrc_client._state
+        assert newlink.torn_down is False, "the new link was leaked/torn down"
+        assert g.status[status_before:] == [], g.status[status_before:]
+    finally:
+        restore()
+    print("ok test_a_stale_task_that_raises_does_not_kill_the_newer_session")
+
+
+def test_a_live_task_that_raises_still_reports_and_closes():
+    # The other half: the _stale() guard must not make a real failure silent.
+    g = _idle_session()
+    restore, transport = _install_session_stubs(path_found_after=1)
+    try:
+        def _boom(h):
+            raise OSError("radio busy")
+
+        transport.hops_to = staticmethod(_boom)
+        coro = rrc_client._session_task(b"\x42" * 16)
+        _step(coro, 1)
+        assert _step(coro, 20), "the task never finished"
+        assert rrc_client._state == rrc_client.CLOSED, rrc_client._state
+        assert rrc_client._link is None
+        assert any("connect failed" in s for s in g.status), g.status
+    finally:
+        restore()
+    print("ok test_a_live_task_that_raises_still_reports_and_closes")
+
+
+def test_a_banned_hub_is_refused_but_another_hub_is_not():
+    g = _idle_session()
+    restore, transport = _install_session_stubs()
+    try:
+        rrc_client._banned = set([b"\x42" * 16])
+        coro = rrc_client._session_task(b"\x42" * 16)
+        assert _step(coro, 5), "the banned hub was dialled anyway"
+        assert any("banned" in s for s in g.status), g.status
+        assert _FakeOutgoingLink.instances == [], _FakeOutgoingLink.instances
+
+        coro = rrc_client._session_task(b"\x43" * 16)
+        _step(coro, 1)
+        assert rrc_client._state == rrc_client.CONNECTING, \
+            "a ban on one hub blocked another"
+    finally:
+        restore()
+    print("ok test_a_banned_hub_is_refused_but_another_hub_is_not")
+
+
+# --- Minor 1: an event names the mover, not everybody in the body ----------
+
+
+def test_a_join_event_names_only_the_mover():
+    # rrcd's event bodies are [peer_hash] -- exactly one -- so this is
+    # hardening for a hub that sends the whole room instead. The nick
+    # belongs to the member that moved, not to everyone listed.
+    g, link = _session(room="#varna")
+    mover = b"\x55" * 16
+    bystander = b"\x66" * 16
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_JOINED, src=b"\xaa" * 16, room="#varna",
+        body=[mover, bystander], nick="sam")))
+    assert rrc_client._roster.get(mover) == "sam", rrc_client._roster
+    assert rrc_client._roster.get(bystander) is None, \
+        "the mover's nick was stamped on another member"
+    print("ok test_a_join_event_names_only_the_mover")
+
+
+def test_a_part_event_removes_only_the_mover():
+    g, link = _session(room="#varna")
+    mover = b"\x55" * 16
+    bystander = b"\x66" * 16
+    rrc_client._roster = {mover: "sam", bystander: "kc1awv"}
+    rrc_client._on_packet(C.dumps(P.make_envelope(
+        P.T_PARTED, src=b"\xaa" * 16, room="#varna",
+        body=[mover, bystander], nick="sam")))
+    assert mover not in rrc_client._roster, rrc_client._roster
+    assert bystander in rrc_client._roster, \
+        "a PART removed members that did not leave"
+    print("ok test_a_part_event_removes_only_the_mover")
 
 
 if __name__ == "__main__":

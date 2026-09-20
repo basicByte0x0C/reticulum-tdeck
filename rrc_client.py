@@ -29,13 +29,34 @@ _my_identity = None
 
 def init(gui, identity):
     """Hook announce observation. Call once at boot, after Reticulum init."""
-    global _gui, _my_identity, _no_retry, _backoff_until
+    global _gui, _my_identity, _banned, _backoff_until
     _gui = gui
     _my_identity = identity
-    _no_retry = False
+    _banned = set()
     _backoff_until = 0
     from urns.transport import Transport
     Transport.register_announce_handler(_on_announce)
+
+
+def _txt(value):
+    """A hub-supplied string, or None if the hub sent something else.
+
+    The one type boundary between the wire and the UI. Everything a hub
+    sends is attacker-controlled CBOR, and the decoder is deliberately
+    permissive, so K_NICK can arrive as bytes, K_ROOM as an int and the
+    WELCOME hub name as a list. Those used to be type-checked at the two
+    or three places that happened to look and trusted everywhere else --
+    and a str-only assumption downstream is not a cosmetic bug: nick +
+    "> " + text runs inside ui.draw(), which gui_loop calls while holding
+    the display SPI lock with no try/except. A TypeError there kills the
+    task mid-lock: the screen freezes for good and the mutex leaks.
+    "@" + nick has the same shape inside kbd_loop.
+
+    So it is validated once, here, as the value is read out of the
+    envelope -- before it can reach module state or the GUI -- rather
+    than defensively at every use. No value from a hub leaves this module
+    as anything but a str or None."""
+    return value if isinstance(value, str) else None
 
 
 def _hub_hash(dest_hash):
@@ -91,7 +112,14 @@ def _on_announce(dest_hash, app_data, packet):
 
 
 def clear_hubs():
-    """Interface switched -- reachability changed, start over."""
+    """Interface switched -- reachability changed, start over.
+
+    Disconnects first, the way rnsh_client.clear_nodes() does. Clearing
+    only the GUI list left the link alive on an interface that no longer
+    exists: say() still believed it was JOINED and reported "send failed"
+    once per message, and the hub held the session open paying keepalive
+    airtime against a client that could never answer."""
+    disconnect()
     if _gui is not None:
         _gui.clear_rrc_hubs()
 
@@ -120,7 +148,11 @@ _roster = {}            # identity_hash -> nick or None
 _seen_ids = []          # recent K_IDs, newest last
 _limits = {}            # WELCOME limits map
 _hub_name = None
-_no_retry = False       # set by ERROR "banned": never reconnect this session
+# Hubs that answered ERROR "banned". Scoped to the hub that said it, not
+# global: one flat flag blocked connecting to EVERY hub until reboot, and
+# reported "banned by this hub" over whichever hub the user tried next.
+# The spec scopes the ban to the banning hub, and it holds for the session.
+_banned = set()
 _backoff_until = 0      # time.time() before which sends are refused
 
 
@@ -128,15 +160,39 @@ def is_active():
     return _state in (CONNECTING, READY, JOINED)
 
 
-def _send_env(env):
+def is_banned(dest_hash):
+    return dest_hash in _banned
+
+
+def _mdu():
+    """This link's max plaintext per packet (431 at MTU 500)."""
+    return getattr(_link, "mdu", 431) if _link is not None else 431
+
+
+def _send_raw(data):
     if _link is None:
         return False
     try:
-        _link.send(cbor.dumps(env))
+        _link.send(data)
         return True
     except Exception as e:
         _status("send failed: " + str(e))
         return False
+
+
+def _send_env(env):
+    """Encode and send, never exceeding the link MDU.
+
+    urns' OutgoingLink.send() has no MDU guard, so this is the only thing
+    standing between an oversized envelope and ~1.1 s of wasted LoRa
+    airtime. encode_capped() trims env in step with the bytes."""
+    if _link is None:
+        return False
+    data = P.encode_capped(env, _mdu())
+    if data is None:
+        _status("send failed: will not fit the link")
+        return False
+    return _send_raw(data)
 
 
 def _nick():
@@ -187,20 +243,41 @@ def _roster_changed():
     _gui.rrc_members(members)
 
 
+def _clean_limits(limits):
+    """The WELCOME limits map, keeping only the entries that are integers.
+
+    Every value here is a budget arithmetic is done on -- a byte cap, a
+    nick length, a rate. A hub sending {L_MAX_BODY: "350"} reached
+    min("350", 367) in body_cap() and raised TypeError on the say() path.
+    body_cap() and normalize_nick() both fall back safely on their own now,
+    but a limit that is not an integer is not a limit, so it is dropped
+    per key rather than stored and worked around later."""
+    if not isinstance(limits, dict):
+        return {}
+    out = {}
+    for k in limits:
+        v = limits[k]
+        if isinstance(v, int) and not isinstance(v, bool):
+            out[k] = v
+    return out
+
+
 def _on_packet(data, packet=None):
     """Inbound link packet -> one decoded envelope, dispatched by type.
 
     Structured fields only: every NOTICE the hub sends is rendered as
     text rather than parsed, because its wording is an unversioned
     formatting choice that differs between hub implementations."""
-    global _state, _limits, _hub_name, _no_retry, _backoff_until, _room
+    global _state, _limits, _hub_name, _backoff_until, _room
 
     env = P.parse(data)
     if env is None:
         return
     t = env[P.K_T]
     src = env.get(P.K_SRC)
-    nick = env.get(P.K_NICK)
+    # _txt() here, once, is the whole of Critical 1: from this line on,
+    # nick is a str or None on every path out of this function.
+    nick = _txt(env.get(P.K_NICK))
     body = env.get(P.K_BODY)
 
     if t == P.T_PING:
@@ -218,9 +295,8 @@ def _on_packet(data, packet=None):
 
     if t == P.T_WELCOME:
         if isinstance(body, dict):
-            _hub_name = body.get(P.B_WELCOME_HUB)
-            limits = body.get(P.B_WELCOME_LIMITS)
-            _limits = limits if isinstance(limits, dict) else {}
+            _hub_name = _txt(body.get(P.B_WELCOME_HUB))
+            _limits = _clean_limits(body.get(P.B_WELCOME_LIMITS))
         else:
             _hub_name = None
             _limits = {}
@@ -230,7 +306,7 @@ def _on_packet(data, packet=None):
         return
 
     if t == P.T_JOINED:
-        room = env.get(P.K_ROOM)
+        room = _txt(env.get(P.K_ROOM))
         # Our own JOIN reply, or somebody else arriving?
         #
         # _state alone is not enough: slash commands reach the hub verbatim
@@ -242,27 +318,31 @@ def _on_packet(data, packet=None):
         # polluted. Our own reply always echoes the room we asked for, so a
         # *named* room that is not the one we are in can only be our own.
         #
-        # The isinstance() guard is load-bearing: a hub that omits K_ROOM
-        # from its arrival broadcasts would otherwise have every arrival
-        # look like a join and wipe the roster.
-        if _state != JOINED or (isinstance(room, str) and room != _room):
+        # The None guard (K_ROOM absent, or not a string) is load-bearing:
+        # a hub that omits K_ROOM from its arrival broadcasts would
+        # otherwise have every arrival look like a join and wipe the roster.
+        if _state != JOINED or (room is not None and room != _room):
             # The body is the room's entire member list, and there is no
             # nick -- it is not an arrival event.
             _roster.clear()
             if isinstance(body, list):
                 for member in body:
                     _remember(member, None)
-            if isinstance(room, str) and room:
+            if room:
                 _room = room          # adopt whatever the hub echoed
             _state = JOINED
             if _gui is not None:
                 _gui.rrc_joined(room)
         else:
-            # Somebody else arrived. K_SRC is the hub; the body carries
-            # the one identity that actually joined, and K_NICK names it.
+            # Somebody else arrived. K_SRC is the hub; the body carries the
+            # identity that actually joined, and K_NICK names it. rrcd
+            # sends exactly one (router.py:503), but a hub that sends the
+            # whole room instead must not have the mover's nick stamped on
+            # everybody in it -- the mover is the first entry; the rest are
+            # members we simply learn about, nameless.
             if isinstance(body, list):
-                for member in body:
-                    _remember(member, nick)
+                for i in range(len(body)):
+                    _remember(body[i], nick if i == 0 else None)
             if nick:
                 _line("event", None, "* " + nick + " joined")
         _roster_changed()
@@ -271,10 +351,15 @@ def _on_packet(data, packet=None):
     if t == P.T_PARTED:
         # Roster accuracy depends on the hub's include_joined_member_list
         # config: when off, T_PARTED bodies are None and departures linger.
-        if isinstance(body, list):
-            for member in body:
-                if isinstance(member, (bytes, bytearray)):
-                    _roster.pop(bytes(member), None)
+        #
+        # Only the mover is removed -- the first entry, as rrcd sends it
+        # (router.py:623, a one-element body). A hub that sends the whole
+        # room instead must not empty our roster: members we cannot prove
+        # left stay, and a rejoin reseeds the list from scratch anyway.
+        if isinstance(body, list) and body:
+            member = body[0]
+            if isinstance(member, (bytes, bytearray)):
+                _roster.pop(bytes(member), None)
         if nick:
             _line("event", None, "* " + nick + " left")
         _roster_changed()
@@ -297,7 +382,8 @@ def _on_packet(data, packet=None):
         text = body if isinstance(body, str) else "error"
         _line("error", None, text)
         if text == P.ERR_BANNED:
-            _no_retry = True
+            if _dest is not None:
+                _banned.add(_dest)      # this hub only, for the session
             disconnect()
         elif text == P.ERR_RATE_LIMITED:
             _backoff_until = time.time() + RATE_BACKOFF_S
@@ -316,9 +402,14 @@ _task_gen = 0
 
 
 def compose_cap():
-    """Longest body this session can send, from the hub's limit and the link."""
-    mdu = getattr(_link, "mdu", 431) if _link is not None else 431
-    return P.body_cap(mdu, _limits.get(P.L_MAX_BODY))
+    """Longest body this session can send, from the hub's limit and the link.
+
+    Sized against THIS session's envelope -- its room name, its nick --
+    because those are what the body shares the 431-byte MDU with, and they
+    are the part a fixed overhead constant could not see."""
+    src = getattr(_my_identity, "hash", None)
+    return P.body_cap(_mdu(), _limits.get(P.L_MAX_BODY), src=src,
+                      room=_room, nick=_nick())
 
 
 def mention_for(identity_hash):
@@ -375,6 +466,14 @@ def say(text):
             return False
     env = P.make_envelope(t, src=_my_identity.hash, room=_room,
                           body=body, nick=_nick())
+    # Measure the real packet before anything is echoed or sent. cap is an
+    # estimate from a probe encode; this is the encoder itself, and it trims
+    # env in step, so the echo below shows exactly what went on the wire.
+    data = P.encode_capped(env, _mdu())
+    body = env.get(P.K_BODY, "")
+    if data is None or not body:
+        _line("error", None, "not sent: no room in the budget")
+        return False
     # Echo locally, and pre-seed the dedupe with our own K_ID.
     #
     # Whether rrcd fans a message back to its sender is settled by neither
@@ -385,7 +484,7 @@ def say(text):
     # before calling on_send.
     _seen(env[P.K_ID])
     _line("msg" if t == P.T_MSG else "action", _nick(), body)
-    ok = _send_env(env)
+    ok = _send_raw(data)
     if not ok:
         # _send_env only reports through _status(), which the room view
         # does not render -- and the echo above has already told the user
@@ -487,31 +586,45 @@ def _drop_link(link):
 
 
 def connect(dest_hash):
-    """GUI: open an RRC session to a hub (RRC tab click / manual hash)."""
+    """GUI: open an RRC session to a hub (RRC tab click / manual hash).
+
+    One session at a time, and the newest request wins. Refusing instead
+    ("busy - session in progress") was worse than it looks: rrc_ui's
+    open_selected_hub() has already switched the view and wiped the
+    scrollback by the time this runs, so the user sat on an empty hub-B
+    console while still joined to hub A, with A's traffic painting into
+    it. Tearing the old session down here keeps the UI and the client
+    describing the same hub, and stops paying airtime for a session
+    nobody is looking at."""
     import uasyncio as asyncio
-    asyncio.create_task(_session_task(dest_hash))
+    if is_active():
+        disconnect()
+    # The generation is claimed HERE, not when the coroutine first runs:
+    # two clicks inside one event-loop turn would otherwise both pass an
+    # is_active() check and the older task would win the race.
+    asyncio.create_task(_session_task(dest_hash, _task_gen_next()))
 
 
-async def _session_task(dest_hash):
+async def _session_task(dest_hash, my_gen=None):
     """Path -> link (with retries) -> identify -> HELLO -> WELCOME.
 
     HELLO is sent once, after the link is ACTIVE and identified. Retrying
     it on a live link would reset the session server-side and drop us
     from every room, so only link establishment is retried."""
-    global _link, _dest, _state, _limits, _no_retry
+    global _link, _dest, _state, _limits
 
     import uasyncio as asyncio
     from urns.identity import Identity
     from urns.transport import Transport
 
-    if is_active():
-        _status("busy - session in progress")
-        return
-    if _no_retry:
+    if my_gen is None:                  # called directly rather than via connect()
+        my_gen = _task_gen_next()
+    if _stale(my_gen):
+        return                          # superseded before we even started
+    if dest_hash in _banned:
         _status("banned by this hub")
         return
 
-    my_gen = _task_gen_next()
     _dest = dest_hash
     _state = CONNECTING
     _limits = {}
@@ -609,6 +722,14 @@ async def _session_task(dest_hash):
             _status("no WELCOME - hub silent")
             disconnect()
     except Exception as e:
+        if _stale(my_gen):
+            # Every other exit in this function checks first; this one did
+            # not. A task abandoned by a newer connect() that then raised
+            # set _link = None and _state = CLOSED, silently killing the
+            # NEW session and leaking its link -- never torn down, still
+            # open on the hub and still paying keepalive airtime -- while
+            # painting "connect failed" over the new session's status.
+            return
         _link = None
         _status("connect failed: " + str(e))
         _state = CLOSED
