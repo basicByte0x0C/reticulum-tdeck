@@ -1716,6 +1716,100 @@ class UI:
             text = text[idx:].lstrip(" ")
         return lines
 
+    def _save_favorites(self, data):
+        try:
+            import json
+            with open('/rns/favorites.json', 'w') as f:
+                json.dump(data, f)
+                return True
+        except Exception as e:
+            print("Failed to save favorites: " + str(e)) # TODO: Remove this line
+            return False
+
+    def _load_favorites(self):
+        try:
+            import json
+            with open('/rns/favorites.json', 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print("Failed to load favorites: " + str(e)) # TODO: Remove this line
+            return {}
+
+    def _read_favorites(self):
+        favs = self._load_favorites()
+        save_before_quit = False
+        if None == favs:
+            return
+        for i in range(5):
+            # Load all favorite peers
+            try:
+                peer = favs.get("favPeer_" + str(i))
+                if None != peer:
+                    pk = favs.get("favPeerKey_" + str(i))
+                    if None != pk:
+                        if bytes.fromhex(pk) in self._peer_keys:
+                            continue # Peer already exist
+                        self._peer_keys.append(bytes.fromhex(pk))
+                        self.add_peer(bytes.fromhex(pk), name=peer.get("name"), fav=True)
+                        print("Loaded peer <" + pk + ">") # TODO: Remove this line
+                    else:
+                        # Something is wrong, discard favorite
+                        favs["favPeer_" + str(i)] = None
+                        favs["favPeerKey_" + str(i)] = None
+                        save_before_quit = True
+                        print("Desynchronized peer " + peer.get("Name")) # TODO: Remove this line
+                else:
+                    # Peer slot empty
+                    print("Peer number " + str(i) + " is empty")  # TODO: Remove this line
+                    continue
+            except Exception as e:
+                print("Failed to load favorite: " + str(e)) # TODO: Remove this line
+        if True == save_before_quit:
+            self._save_favorites(favs)
+
+    # --- Favorite handling ---
+    def _favorite_peer(self):
+        print("Favorite peer called") # TODO: Remove this line
+        if self._peer_keys and 0 <= self.selected_idx < len(self._peer_keys):
+            self.selected_peer = self._peer_keys[self.selected_idx]
+            favs = self._load_favorites()
+            if None == favs:
+                print("Empty Favorites") # TODO: Remove this line
+                return False
+            print("Selected peer is <" + self.selected_peer.hex() + ">") # TODO: Remove this line
+            for i in range(5):
+                peer_slot = favs.get("favPeerKey_" + str(i))
+                if peer_slot == None:
+                    # Empty slot, add to favorite
+                    favs["favPeerKey_" + str(i)] = self.selected_peer.hex()
+                    self.peers[self.selected_peer]["fav"] = True
+                    favs["favPeer_" + str(i)] = self.peers.get(self.selected_peer)
+                    self._save_favorites(favs)
+                    self.dirty = True
+                    print("Added <" + self.selected_peer.hex() + "> to favorites") # TODO: Remove this line
+                    return True
+                elif peer_slot == self.selected_peer.hex():
+                    # Already a favorite, unfavorite it
+                    self.peers[self.selected_peer]["fav"] = False
+                    favs["favPeerKey_" + str(i)] = None
+                    favs["favPeer_" + str(i)] = None
+                    self._save_favorites(favs)
+                    self.dirty = True
+                    print("Removed <" + self.selected_peer.hex() + "> from favorites") # TODO: Remove this line
+                    return True
+                else:
+                    print("Strange Anomaly") # TODO: Remove this line
+        return False
+
+    def _favorite_node(self):
+        return False
+
+    def _favorite_hub(self):
+        return False
+
+    def _favorite_shell(self):
+        return False
+
     # --- Input handling ---
 
     # Screens that consume typed characters. Everywhere else, e and x are
@@ -1863,6 +1957,16 @@ class UI:
                 rrc_ui.open_selected_hub(self)
             else:  # TAB_SSH
                 self._open_selected_shell()
+            return True
+        elif key == b'f' or key == b'F': # F to favorite the node
+            if self.node_tab == TAB_MSG:
+                self._favorite_peer()
+            elif self.node_tab == TAB_NET:
+                self._favorite_node()
+            elif self.node_tab == TAB_RRC:
+                self._favorite_hub()
+            else:
+                self._favorite_shell()
             return True
         return False
 
@@ -3930,9 +4034,9 @@ class UI:
 
     def clear_peers(self):
         """Clear node list, chat history, and related state."""
-        self.peers.clear()
-        self._peer_keys.clear()
-        self.chat_history.clear()
+        # self.peers.clear() TODO: Adapt this
+        # self._peer_keys.clear() TODO: Adapt this
+        # self.chat_history.clear() TODO: Adapt this
         # Media is keyed by message id, which nothing will reference again
         # once the history holding those ids is gone.
         self._image_cache.clear()
@@ -3957,7 +4061,7 @@ class UI:
                 cache.pop(k, None)
         self._image_cache_order = [ck for ck in self._image_cache_order if ck[0] != key]
 
-    def add_peer(self, dest_hash, name, rssi=None, hops=None, via=None):
+    def add_peer(self, dest_hash, name, rssi=None, hops=None, via=None, fav=False):
         """Add or update a peer from an announce."""
         if dest_hash not in self.peers and len(self.peers) >= MAX_PEERS:
             # Evict the least-recently-seen peer — never index 0, which
@@ -3977,7 +4081,7 @@ class UI:
                 self.selected_idx = max(0, len(self._peer_keys) - 1)
 
         self.peers[dest_hash] = {"name": name or "?", "rssi": rssi,
-                                 "hops": hops, "via": via, "seen": time.time()}
+                                 "hops": hops, "via": via, "seen": time.time(), "fav": fav}
         if dest_hash not in self._peer_keys:
             self._peer_keys.append(dest_hash)
         self._route_cache = ''  # selected-peer footer may show new route info
