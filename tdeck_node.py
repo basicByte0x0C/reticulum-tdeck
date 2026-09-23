@@ -701,6 +701,9 @@ def _stop_wifi():
     wlan = network.WLAN(network.STA_IF)
     wlan.disconnect()
     wlan.active(False)
+    settings = _load_settings()
+    settings["wifi_enabled"] = False
+    _save_settings(settings)
     if DEBUG >= 1:
         print("[WiFi] Disconnected")
 
@@ -769,6 +772,7 @@ def wifi_connect(ssid, password):
             settings = _load_settings()
             settings["wifi_ssid"] = ssid
             settings["wifi_pass"] = password
+            settings["wifi_enabled"] = True
             _save_settings(settings)
             if DEBUG >= 1:
                 print("[WiFi] Connected to", ssid, "IP:", ip)
@@ -813,6 +817,7 @@ async def _wifi_connect_task(ssid, password):
                 settings = _load_settings()
                 settings["wifi_ssid"] = ssid
                 settings["wifi_pass"] = password
+                settings["wifi_enabled"] = True
                 _save_settings(settings)
                 break
             await asyncio.sleep_ms(200)
@@ -969,25 +974,24 @@ def tcp_toggle(enabled, host=None, port=None):
                 _tcp_iface.close()
             Transport.deregister_interface(_tcp_iface)
             _tcp_iface = None
-            settings = _load_settings()
-            settings["tcp_enabled"] = False
-            _save_settings(settings)
-            gui.clear_peers()
-            _lxmf_to_peer.clear()
-            nomad_browser.clear_nodes()
-            rnsh_client.clear_nodes()
-            rrc_client.clear_hubs()
-            if DEBUG >= 1:
-                print("[TCP] Interface stopped")
-            # Disconnect WiFi
-            _stop_wifi()
-            gui._wifi_connected = False
-            gui._wifi_ssid_current = ""
-            gui._wifi_ip = ""
-            # Restart LoRa
-            _start_lora()
-            return True
-        return False
+        settings = _load_settings()
+        settings["tcp_enabled"] = False
+        _save_settings(settings)
+        gui.clear_peers()
+        _lxmf_to_peer.clear()
+        nomad_browser.clear_nodes()
+        rnsh_client.clear_nodes()
+        rrc_client.clear_hubs()
+        if DEBUG >= 1:
+            print("[TCP] Interface stopped")
+        # Disconnect WiFi
+        _stop_wifi()
+        gui._wifi_connected = False
+        gui._wifi_ssid_current = ""
+        gui._wifi_ip = ""
+        # Restart LoRa
+        _start_lora()
+        return True
 
 
 def tcp_connect_async(host, port):
@@ -1603,12 +1607,14 @@ async def _auto_connect_wifi_async():
     import uasyncio as asyncio
     await asyncio.sleep(0)
     settings = _load_settings()
-    ssid = settings.get("wifi_ssid")
-    password = settings.get("wifi_pass")
-    if ssid and password:
-        if DEBUG >= 1:
-            print("[Boot] Reconnecting WiFi:", ssid)
-        wifi_connect_async(ssid, password)   # fires a task; sets gui._wifi_connected on success
+    wifi_enabled = settings.get("wifi_enabled")
+    if wifi_enabled == True:
+        ssid = settings.get("wifi_ssid")
+        password = settings.get("wifi_pass")
+        if ssid and password:
+            if DEBUG >= 1:
+                print("[Boot] Reconnecting WiFi:", ssid)
+            wifi_connect_async(ssid, password)   # fires a task; sets gui._wifi_connected on success
 
 
 async def _auto_start_tcp():
@@ -1616,20 +1622,22 @@ async def _auto_start_tcp():
     import uasyncio as asyncio
     await asyncio.sleep(0)
     settings = _load_settings()
-    # Always restore last used address for the TCP host input page
-    host = settings.get("tcp_host")
-    port = settings.get("tcp_port")
-    if host and port:
-        gui._tcp_target = host + ":" + str(port)
-    # Auto-connect if it was enabled last session — wait (bounded) for the
-    # deferred WiFi reconnect to come up first.
-    if settings.get("tcp_enabled") and host and port:
-        for _ in range(40):                  # up to ~20s for WiFi
-            if gui._wifi_connected:
-                break
-            await asyncio.sleep(0.5)
-        if gui._wifi_connected and tcp_toggle(True, host, port):
-            gui._tcp_enabled = True
+    wifi_enabled = settings.get("wifi_enabled")
+    if True == wifi_enabled: # Enable TCP only if WiFI should be enabled
+        # Always restore last used address for the TCP host input page
+        host = settings.get("tcp_host")
+        port = settings.get("tcp_port")
+        if host and port:
+            gui._tcp_target = host + ":" + str(port)
+        # Auto-connect if it was enabled last session — wait (bounded) for the
+        # deferred WiFi reconnect to come up first.
+        if settings.get("tcp_enabled") and host and port:
+            for _ in range(40):                  # up to ~20s for WiFi
+                if gui._wifi_connected:
+                    break
+                await asyncio.sleep(0.5)
+            if gui._wifi_connected and tcp_toggle(True, host, port):
+                gui._tcp_enabled = True
     gc.collect()
 
 

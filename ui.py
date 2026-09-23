@@ -2846,7 +2846,17 @@ class UI:
                 self.dirty = True
                 return True
             elif ch == 0x0D:  # Enter
-                if self._settings_idx == 0:  # WiFi
+                if self._settings_idx == 0:  # WiFi toggle
+                    if self._wifi_connected:
+                        self._wifi_scanning = False
+                        # Toggle TCP as well - Will stop WiFI and Start LoRa
+                        if self.on_tcp_toggle:
+                            if self.on_tcp_toggle(False, None, None):
+                                self._tcp_enabled = False
+                                self._tcp_target = ""
+                        self._cache = [''] * CACHE_ROWS
+                        self.dirty = True
+                        return True
                     self._settings_page = _SET_WIFI_SCAN
                     self._settings_idx = 0
                     self._settings_scroll = 0
