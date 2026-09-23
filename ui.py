@@ -27,6 +27,7 @@ N_TABS  = 4
 
 MAX_RRC_HUBS = 16
 RRC_SCROLLBACK = 120      # lines kept per session, RAM only
+MAX_FAVORITES = 5
 
 # Shell control-key menu (trackball-click overlay — needs no special keyboard
 # keys, which the T-Deck lacks: no Esc/Tab/Ctrl/~). (label, kind, payload).
@@ -1045,6 +1046,8 @@ class UI:
                 key = visible[i]
                 entry = table[key]
                 name = _ascii(entry.get("name") or "?")
+                if entry.get("fav") == True:
+                    name = "[*] " + name
                 hash_tag = "[" + key.hex()[:8] + "]"
                 uc = self.unread.get(key, 0) if show_unread else 0
                 marker = str(min(uc, 9)) + "*" if uc > 1 else ("* " if uc == 1 else "  ")
@@ -1716,31 +1719,53 @@ class UI:
             text = text[idx:].lstrip(" ")
         return lines
 
-    def _save_favorites(self, data):
+    # --- Favorite handling ---
+    def _save_favorites(self, data, type=None):
+        file = "/rns/"
+        if None == type:
+            return # Unknown favorite usecase
+        elif "peer" == type:
+            file += "peers.json"
+        elif "node" == type:
+            file += "nodes.json"
+        elif "hub" == type:
+            file += "hubs.json"
+        elif "shell" == type:
+            file += "shells.json"
         try:
             import json
-            with open('/rns/favorites.json', 'w') as f:
+            with open(file, 'w') as f:
                 json.dump(data, f)
                 return True
         except Exception as e:
             print("Failed to save favorites: " + str(e)) # TODO: Remove this line
             return False
 
-    def _load_favorites(self):
+    def _load_favorites(self, type=None):
+        file = "/rns/"
+        if None == type:
+            return # Unknown favorite usecase
+        elif "peer" == type:
+            file += "peers.json"
+        elif "node" == type:
+            file += "nodes.json"
+        elif "hub" == type:
+            file += "hubs.json"
+        elif "shell" == type:
+            file += "shells.json"
         try:
             import json
-            with open('/rns/favorites.json', 'r') as f:
+            with open(file, 'r') as f:
                 return json.load(f)
         except Exception as e:
             print("Failed to load favorites: " + str(e)) # TODO: Remove this line
             return {}
 
     def _read_favorites(self):
-        favs = self._load_favorites()
-        save_before_quit = False
+        favs = self._load_favorites("peer")
         if None == favs:
             return
-        for i in range(5):
+        for i in range(MAX_FAVORITES):
             # Load all favorite peers
             try:
                 peer = favs.get("favPeer_" + str(i))
@@ -1756,7 +1781,7 @@ class UI:
                         # Something is wrong, discard favorite
                         favs["favPeer_" + str(i)] = None
                         favs["favPeerKey_" + str(i)] = None
-                        save_before_quit = True
+                        self._save_favorites(favs, "peer")
                         print("Desynchronized peer " + peer.get("Name")) # TODO: Remove this line
                 else:
                     # Peer slot empty
@@ -1764,27 +1789,24 @@ class UI:
                     continue
             except Exception as e:
                 print("Failed to load favorite: " + str(e)) # TODO: Remove this line
-        if True == save_before_quit:
-            self._save_favorites(favs)
 
-    # --- Favorite handling ---
     def _favorite_peer(self):
         print("Favorite peer called") # TODO: Remove this line
         if self._peer_keys and 0 <= self.selected_idx < len(self._peer_keys):
             self.selected_peer = self._peer_keys[self.selected_idx]
-            favs = self._load_favorites()
+            favs = self._load_favorites("peer")
             if None == favs:
                 print("Empty Favorites") # TODO: Remove this line
                 return False
             print("Selected peer is <" + self.selected_peer.hex() + ">") # TODO: Remove this line
-            for i in range(5):
+            for i in range(MAX_FAVORITES):
                 peer_slot = favs.get("favPeerKey_" + str(i))
                 if peer_slot == None:
                     # Empty slot, add to favorite
                     favs["favPeerKey_" + str(i)] = self.selected_peer.hex()
                     self.peers[self.selected_peer]["fav"] = True
                     favs["favPeer_" + str(i)] = self.peers.get(self.selected_peer)
-                    self._save_favorites(favs)
+                    self._save_favorites(favs, "peer")
                     self.dirty = True
                     print("Added <" + self.selected_peer.hex() + "> to favorites") # TODO: Remove this line
                     return True
@@ -1793,7 +1815,7 @@ class UI:
                     self.peers[self.selected_peer]["fav"] = False
                     favs["favPeerKey_" + str(i)] = None
                     favs["favPeer_" + str(i)] = None
-                    self._save_favorites(favs)
+                    self._save_favorites(favs, "peer")
                     self.dirty = True
                     print("Removed <" + self.selected_peer.hex() + "> from favorites") # TODO: Remove this line
                     return True
