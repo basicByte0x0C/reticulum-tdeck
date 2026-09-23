@@ -4164,7 +4164,7 @@ class UI:
             elif self.selected_idx >= len(self._peer_keys):
                 self.selected_idx = max(0, len(self._peer_keys) - 1)
         if fav is False and dest_hash in self.peers:
-            fav == self.peers[dest_hash].get("fav")
+            fav = self.peers[dest_hash].get("fav")
         self.peers[dest_hash] = {"name": name or "?", "rssi": rssi,
                                  "hops": hops, "via": via, "seen": time.time(), "fav": fav}
         if dest_hash not in self._peer_keys:
