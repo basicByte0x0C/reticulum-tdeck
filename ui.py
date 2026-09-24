@@ -1843,29 +1843,11 @@ class UI:
         favs = self._get_favorites(type)
         if favs is None:
             return False
+        empty_slot_idx = -1
         for i in range(MAX_FAVORITES):
             slot = favs.get(type + "Key_" + str(i))
             if slot == None:
-                # Empty slot, add to favorite
-                favs[type + "Key_" + str(i)] = selected_key.hex()
-                if "peer" == type:
-                    self.peers[selected_key]["fav"] = True
-                    favs[type + "_" + str(i)] = self.peers.get(selected_key)
-                elif "node" == type:
-                    self.nomad_nodes[selected_key]["fav"] = True
-                    favs[type + "_" + str(i)] = self.nomad_nodes.get(selected_key)
-                elif "hub" == type:
-                    self.rrc_hubs[selected_key]["fav"] = True
-                    favs[type + "_" + str(i)] = self.rrc_hubs.get(selected_key)
-                elif "shell" == type:
-                    self.shell_nodes[selected_key]["fav"] = True
-                    favs[type + "_" + str(i)] = self.shell_nodes.get(selected_key)
-                else:
-                    return False # Unknown error
-                self._save_favorites(favs, type)
-                self.dirty = True
-                print("Added <" + selected_key.hex() + "> " + type + " to favorites") # TODO: Remove this line
-                return True
+                empty_slot_idx = i
             elif slot == selected_key.hex():
                 # Already a favorite, unfavorite it
                 if "peer" == type:
@@ -1884,6 +1866,27 @@ class UI:
                 self.dirty = True
                 print("Removed <" + selected_key.hex() + "> " + type + " from favorites") # TODO: Remove this line
                 return True
+        if 0 <= empty_slot_idx and empty_slot_idx < MAX_FAVORITES:
+            # Empty slot, add to favorite
+            favs[type + "Key_" + str(empty_slot_idx)] = selected_key.hex()
+            if "peer" == type:
+                self.peers[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.peers.get(selected_key)
+            elif "node" == type:
+                self.nomad_nodes[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.nomad_nodes.get(selected_key)
+            elif "hub" == type:
+                self.rrc_hubs[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.rrc_hubs.get(selected_key)
+            elif "shell" == type:
+                self.shell_nodes[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.shell_nodes.get(selected_key)
+            else:
+                return False # Unknown error
+            self._save_favorites(favs, type)
+            self.dirty = True
+            print("Added <" + selected_key.hex() + "> " + type + " to favorites") # TODO: Remove this line
+            return True       
         return False
 
     # --- Input handling ---
