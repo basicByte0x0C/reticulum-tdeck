@@ -234,8 +234,9 @@ The device starts on the node list screen with four tabs: **MSG** (LXMF chat pee
 | Action | Input |
 |---|---|
 | Switch MSG/NET/RNSH/RRC tab | Trackball left/right (or `b`) |
-| Select peer/node | Trackball up/down |
+| Select peer/node | Trackball up/down (or `e`/`x`) |
 | Open chat / node page / shell | Trackball click (or Enter) |
+| Favorite/Unfavorite selected peer/node | Press `f` |
 | Enter rnsh hash manually (RNSH) | Press `m` |
 | Send announce | Press `a` |
 | Open settings | Press `s` |
@@ -246,7 +247,7 @@ The device starts on the node list screen with four tabs: **MSG** (LXMF chat pee
 
 Deleting a peer forgets its chat history and cached media locally; it
 re-appears on the next announce. When the peer list fills up (16 entries) the
-**least-recently-seen** peer is evicted — never the one you're actively
+**least-recently-seen** peer that is not favorited is evicted — never the one you're actively
 chatting with.
 
 The footer's right side shows a compact status for the **selected entry** — hop count, last RSSI, and last-seen age (`2h -87dB 5m`), learned from announces. Pinging sends a probe to the peer's `urns.probe` destination and shows the round-trip time (`ping: 2.4s`); peers must run uP-reticulum with the probe responder enabled to answer.
@@ -609,6 +610,8 @@ Only one network interface is active at a time. Switching from LoRa to TCP stops
 
 Settings are stored as JSON in `/rns/settings.json` on the device flash. Saved fields: `wifi_ssid`, `wifi_pass`, `tcp_enabled`, `tcp_host`, `tcp_port`, `node_name`. On boot, WiFi and TCP are automatically restored if they were active in the previous session.
 
+Additionally, the favorites are stored in similar way, just in separate and individual files(`/rns/peers.json`, `/rns/nodes.json`, `/rns/hubs.json` and `/rns/shells.json`). On boot, the favorites are automatically loaded from files.
+
 ### SX1262 Notes
 
 - **DC-DC regulator mode** is required for TX (`use_dcdc: True`). The driver defaults to LDO which produces no RF output on the T-Deck.
@@ -692,6 +695,11 @@ pip install esptool littlefs-python
 ```
 
 `littlefs-python` is only needed for the single-flash `tdeck_firmware.bin`; without it the build still emits the three-part flash set and just skips the merge.
+
+The following prerequisites may also be needed(example for Debian):
+```bash
+sudo apt install libreadline-dev liblzma-dev libbz2-dev libsqlite3-dev python3-tk tk-dev
+```
 
 ### Build
 
