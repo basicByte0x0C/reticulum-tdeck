@@ -1743,7 +1743,7 @@ class UI:
     def _get_favorites(self, type=None):
         file = "/rns/"
         if None == type:
-            return # Unknown favorite usecase
+            return {} # Unknown favorite usecase
         elif "peer" == type:
             file += "peers.json"
         elif "node" == type:
@@ -1791,8 +1791,6 @@ class UI:
         if type not in ["peer", "node", "hub", "shell"]:
             return False # Unknown favorite usecase
         favs = self._get_favorites(type)
-        if favs is None:
-            return
         for i in range(MAX_FAVORITES):
             try:
                 entity = favs.get(type + "_" + str(i))
@@ -1836,8 +1834,6 @@ class UI:
         else:
             return False # Unknown type
         favs = self._get_favorites(type)
-        if favs is None:
-            return False
         empty_slot_idx = -1
         for i in range(MAX_FAVORITES):
             slot = favs.get(type + "Key_" + str(i))
