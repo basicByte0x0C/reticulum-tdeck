@@ -4235,8 +4235,8 @@ class UI:
         """Add or update a NomadNet node (NET tab, called by nomad_browser)."""
         prev = self.nomad_nodes.get(dest_hash)
         if prev is None and len(self.nomad_nodes) >= MAX_PEERS:
-            oldest = min(filter(lambda k: not self.noamd_nodes[k].get("fav", False), self._node_keys), 
-                         key=lambda k: self.noamd_nodes[k].get("seen", 0), default=None)
+            oldest = min(filter(lambda k: not self.nomad_nodes[k].get("fav", False), self._node_keys), 
+                         key=lambda k: self.nomad_nodes[k].get("seen", 0), default=None)
             del self.nomad_nodes[oldest]
             self._node_keys.remove(oldest)
             if self.net_idx >= len(self._node_keys):
