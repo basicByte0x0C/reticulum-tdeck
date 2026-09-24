@@ -611,6 +611,7 @@ Only one network interface is active at a time. Switching from LoRa to TCP stops
 Settings are stored as JSON in `/rns/settings.json` on the device flash. Saved fields: `wifi_ssid`, `wifi_pass`, `tcp_enabled`, `tcp_host`, `tcp_port`, `node_name`. On boot, WiFi and TCP are automatically restored if they were active in the previous session.
 
 Additionally, the favorites are stored in similar way, just in separate and individual files(`/rns/peers.json`, `/rns/nodes.json`, `/rns/hubs.json` and `/rns/shells.json`). On boot, the favorites are automatically loaded from files.
+Favorites will appear with `[*]`.
 
 ### SX1262 Notes
 
