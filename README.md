@@ -245,6 +245,8 @@ The device starts on the node list screen with four tabs: **MSG** (LXMF chat pee
 | Lock the device | Hold trackball click (0.7 s), anywhere |
 | Unlock the device | Any trackball click |
 
+Favorites will appear with `[*]` in node list. There is a maximum of 5 favorites for each type(`peer`, `nomad`, `rrc` and `rnsh`).
+
 Deleting a peer forgets its chat history and cached media locally; it
 re-appears on the next announce. When the peer list fills up (16 entries) the
 **least-recently-seen** peer that is not favorited is evicted — never the one you're actively
@@ -611,7 +613,6 @@ Only one network interface is active at a time. Switching from LoRa to TCP stops
 Settings are stored as JSON in `/rns/settings.json` on the device flash. Saved fields: `wifi_ssid`, `wifi_pass`, `tcp_enabled`, `tcp_host`, `tcp_port`, `node_name`. On boot, WiFi and TCP are automatically restored if they were active in the previous session.
 
 Additionally, the favorites are stored in similar way, just in separate and individual files(`/rns/peers.json`, `/rns/nodes.json`, `/rns/hubs.json` and `/rns/shells.json`). On boot, the favorites are automatically loaded from files.
-Favorites will appear with `[*]` in node list.
 
 ### SX1262 Notes
 

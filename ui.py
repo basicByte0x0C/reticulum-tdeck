@@ -1738,7 +1738,6 @@ class UI:
                 json.dump(data, f)
                 return True
         except Exception as e:
-            print("Failed to save favorites: " + str(e)) # TODO: Remove this line
             return False
 
     def _get_favorites(self, type=None):
@@ -1758,7 +1757,6 @@ class UI:
             with open(file, 'r') as f:
                 return json.load(f)
         except Exception as e:
-            print("Failed to load favorites: " + str(e)) # TODO: Remove this line
             return {}
 
     def _favorite_key_exists(self, key, type=None):
@@ -1804,18 +1802,15 @@ class UI:
                         if self._favorite_key_exists(bytes.fromhex(ek), type):
                             continue # Entity already exists
                         self._favorite_add_entity(bytes.fromhex(ek), entity, type)
-                        print("Loaded " + type + " <" + ek + ">") # TODO: Remove this line
                     else:
                         # Something is wrong, discard favorite
                         favs[type + "_" + str(i)] = None
                         favs[type + "Key_" + str(i)] = None
                         self._save_favorites(favs, type)
-                        print("Desynchronized " + type + " " + entity.get("Name")) # TODO: Remove this line
                 else:
-                    print(type + " number " + str(i) + " is empty")  # TODO: Remove this line
                     continue # Slot empty
             except Exception as e:
-                print("Failed to load favorite: " + str(e)) # TODO: Remove this line
+                return
 
     def load_favorites(self):
         for type in ["peer", "node", "hub", "shell"]:
@@ -1864,7 +1859,6 @@ class UI:
                 favs[type + "_" + str(i)] = None
                 self._save_favorites(favs, type)
                 self.dirty = True
-                print("Removed <" + selected_key.hex() + "> " + type + " from favorites") # TODO: Remove this line
                 return True
         if 0 <= empty_slot_idx and empty_slot_idx < MAX_FAVORITES:
             # Empty slot, add to favorite
@@ -1885,7 +1879,6 @@ class UI:
                 return False # Unknown error
             self._save_favorites(favs, type)
             self.dirty = True
-            print("Added <" + selected_key.hex() + "> " + type + " to favorites") # TODO: Remove this line
             return True       
         return False
 
