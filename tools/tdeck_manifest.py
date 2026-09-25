@@ -159,9 +159,12 @@ freeze(_vendor, "urns/crypto/pure25519/ed25519_oop.py")
 freeze(_vendor, "urns/crypto/pure25519/eddsa.py")
 
 # --- urns/interfaces ---
+# e32.py and serial.py are not frozen: the T-Deck has neither an EByte E32
+# nor a serial KISS link, and urns imports interface modules lazily by
+# configured type (a missing one logs an error, it does not crash). Dropping
+# them keeps the app image under the 2 MiB M5Launcher slot. udp.py stays: it
+# is urns' default interface when /rns/config.json is unreadable.
 freeze(_vendor, "urns/interfaces/__init__.py")
-freeze(_vendor, "urns/interfaces/e32.py")
 freeze(_vendor, "urns/interfaces/lora.py")
-freeze(_vendor, "urns/interfaces/serial.py")
 freeze(_vendor, "urns/interfaces/tcp.py")
 freeze(_vendor, "urns/interfaces/udp.py")
