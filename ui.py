@@ -27,6 +27,7 @@ N_TABS  = 4
 
 MAX_RRC_HUBS = 16
 RRC_SCROLLBACK = 120      # lines kept per session, RAM only
+MAX_FAVORITES = 5
 
 # Shell control-key menu (trackball-click overlay — needs no special keyboard
 # keys, which the T-Deck lacks: no Esc/Tab/Ctrl/~). (label, kind, payload).
@@ -1045,6 +1046,8 @@ class UI:
                 key = visible[i]
                 entry = table[key]
                 name = _ascii(entry.get("name") or "?")
+                if entry.get("fav") == True:
+                    name = "[*] " + name
                 hash_tag = "[" + key.hex()[:8] + "]"
                 uc = self.unread.get(key, 0) if show_unread else 0
                 marker = str(min(uc, 9)) + "*" if uc > 1 else ("* " if uc == 1 else "  ")
@@ -1716,6 +1719,165 @@ class UI:
             text = text[idx:].lstrip(" ")
         return lines
 
+    # --- Favorite handling ---
+    def _save_favorites(self, data, type=None):
+        file = "/rns/"
+        if None == type:
+            return # Unknown favorite usecase
+        elif "peer" == type:
+            file += "peers.json"
+        elif "node" == type:
+            file += "nodes.json"
+        elif "hub" == type:
+            file += "hubs.json"
+        elif "shell" == type:
+            file += "shells.json"
+        try:
+            import json
+            with open(file, 'w') as f:
+                json.dump(data, f)
+                return True
+        except Exception as e:
+            return False
+
+    def _get_favorites(self, type=None):
+        file = "/rns/"
+        if None == type:
+            return {} # Unknown favorite usecase
+        elif "peer" == type:
+            file += "peers.json"
+        elif "node" == type:
+            file += "nodes.json"
+        elif "hub" == type:
+            file += "hubs.json"
+        elif "shell" == type:
+            file += "shells.json"
+        try:
+            import json
+            with open(file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            return {}
+
+    def _favorite_key_exists(self, key, type=None):
+        if "peer" == type:
+            if key in self._peer_keys:
+                return True
+        elif "node" == type:
+            if key in self._node_keys:
+                return True
+        elif "hub" == type:
+            if key in self._rrc_keys:
+                return True
+        elif "shell" == type:
+            if key in self._shell_keys:
+                return True
+        return False
+
+    def _favorite_add_entity(self, key, entity, type=None):
+        if "peer" == type:
+            self.add_peer(key, name=entity.get("name"), fav=True)
+        elif "node" == type:
+            self.add_nomad_node(key, entity.get("name"), fav=True)
+        elif "hub" == type:
+            self.add_rrc_hub(key, entity.get("name"), fav=True)
+        elif "shell" == type:
+            self.add_shell_node(key, entity.get("name"), fav=True)
+        else:
+            return False # Unknown favorite usecase
+        return True
+
+    def _load_favorite(self, type=None):
+        if type not in ["peer", "node", "hub", "shell"]:
+            return False # Unknown favorite usecase
+        favs = self._get_favorites(type)
+        for i in range(MAX_FAVORITES):
+            try:
+                entity = favs.get(type + "_" + str(i))
+                if None != entity:
+                    ek = favs.get(type + "Key_" + str(i))
+                    if None != ek:
+                        if self._favorite_key_exists(bytes.fromhex(ek), type):
+                            continue # Entity already exists
+                        self._favorite_add_entity(bytes.fromhex(ek), entity, type)
+                    else:
+                        # Something is wrong, discard favorite
+                        favs[type + "_" + str(i)] = None
+                        favs[type + "Key_" + str(i)] = None
+                        self._save_favorites(favs, type)
+                else:
+                    continue # Slot empty
+            except Exception as e:
+                return
+
+    def load_favorites(self):
+        for type in ["peer", "node", "hub", "shell"]:
+            self._load_favorite(type)
+
+    def _favorite(self, type=None):
+        if "peer" == type:
+            if not self._peer_keys or 0 > self.selected_idx or len(self._peer_keys) <= self.selected_idx:
+                return False # Unknown peer
+            selected_key = self._peer_keys[self.selected_idx]
+        elif "node" == type:
+            if not self._node_keys or 0 > self.net_idx or len(self._node_keys) <= self.net_idx:
+                return False # Unknown peer
+            selected_key = self._node_keys[self.net_idx]
+        elif "hub" == type:
+            if not self._rrc_keys or 0 > self._rrc_idx or len(self._rrc_keys) <= self._rrc_idx:
+                return False # Unknown hub
+            selected_key = self._rrc_keys[self._rrc_idx]
+        elif "shell" == type:
+            if not self._shell_keys or 0 > self.ssh_idx or len(self._shell_keys) <= self.ssh_idx:
+                return False # Unknown shell
+            selected_key = self._shell_keys[self.ssh_idx]
+        else:
+            return False # Unknown type
+        favs = self._get_favorites(type)
+        empty_slot_idx = -1
+        for i in range(MAX_FAVORITES):
+            slot = favs.get(type + "Key_" + str(i))
+            if slot == None:
+                empty_slot_idx = i
+            elif slot == selected_key.hex():
+                # Already a favorite, unfavorite it
+                if "peer" == type:
+                    self.peers[selected_key]["fav"] = False
+                elif "node" == type:
+                    self.nomad_nodes[selected_key]["fav"] = False
+                elif "hub" == type:
+                    self.rrc_hubs[selected_key]["fav"] = False
+                elif "shell" == type:
+                    self.shell_nodes[selected_key]["fav"] = False
+                else:
+                    return False # Unknown error
+                favs[type + "Key_" + str(i)] = None
+                favs[type + "_" + str(i)] = None
+                self._save_favorites(favs, type)
+                self.dirty = True
+                return True
+        if 0 <= empty_slot_idx and empty_slot_idx < MAX_FAVORITES:
+            # Empty slot, add to favorite
+            favs[type + "Key_" + str(empty_slot_idx)] = selected_key.hex()
+            if "peer" == type:
+                self.peers[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.peers.get(selected_key)
+            elif "node" == type:
+                self.nomad_nodes[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.nomad_nodes.get(selected_key)
+            elif "hub" == type:
+                self.rrc_hubs[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.rrc_hubs.get(selected_key)
+            elif "shell" == type:
+                self.shell_nodes[selected_key]["fav"] = True
+                favs[type + "_" + str(empty_slot_idx)] = self.shell_nodes.get(selected_key)
+            else:
+                return False # Unknown error
+            self._save_favorites(favs, type)
+            self.dirty = True
+            return True       
+        return False
+
     # --- Input handling ---
 
     # Screens that consume typed characters. Everywhere else, e and x are
@@ -1863,6 +2025,16 @@ class UI:
                 rrc_ui.open_selected_hub(self)
             else:  # TAB_SSH
                 self._open_selected_shell()
+            return True
+        elif key == b'f' or key == b'F': # F to favorite the node
+            if self.node_tab == TAB_MSG:
+                self._favorite("peer")
+            elif self.node_tab == TAB_NET:
+                self._favorite("node")
+            elif self.node_tab == TAB_RRC:
+                self._favorite("hub")
+            elif self.node_tab == TAB_SSH:
+                self._favorite("shell")
             return True
         return False
 
@@ -2035,12 +2207,12 @@ class UI:
             return True
         return True
 
-    def add_shell_node(self, dest_hash, name=None, hops=None, seen=None):
+    def add_shell_node(self, dest_hash, name=None, hops=None, seen=None, fav=False):
         """Add or update an rnsh listener (SSH tab, called by rnsh_client)."""
         prev = self.shell_nodes.get(dest_hash)
         if prev is None and len(self.shell_nodes) >= MAX_PEERS:
-            oldest = min(self._shell_keys,
-                         key=lambda k: self.shell_nodes[k].get("seen", 0))
+            oldest = min(filter(lambda k: not self.shell_nodes[k].get("fav", False), self._shell_keys),
+                         key=lambda k: self.shell_nodes[k].get("seen", 0), default=None)
             del self.shell_nodes[oldest]
             self._shell_keys.remove(oldest)
             if self.ssh_idx >= len(self._shell_keys):
@@ -2050,10 +2222,12 @@ class UI:
                 name = prev.get("name")
             if seen is not None and prev.get("seen", 0) > seen:
                 seen = prev["seen"]
+            if fav is False:
+                fav = prev["fav"]
         # rnsh announces carry no name — show a short hash so the row isn't "?"
         self.shell_nodes[dest_hash] = {"name": name or dest_hash.hex()[:10],
                                        "hops": hops,
-                                       "seen": time.time() if seen is None else seen}
+                                       "seen": time.time() if seen is None else seen, "fav": fav}
         if dest_hash not in self._shell_keys:
             self._shell_keys.append(dest_hash)
         if self.state == STATE_NODES and self.node_tab == TAB_SSH:
@@ -2063,6 +2237,7 @@ class UI:
         """Clear the SSH tab (interface switch)."""
         self.shell_nodes.clear()
         self._shell_keys.clear()
+        self._load_favorite("shell")
         self.ssh_idx = 0
         self.ssh_scroll = 0
         self._cache = [''] * CACHE_ROWS
@@ -2109,7 +2284,7 @@ class UI:
 
     # --- RRC (Reticulum Relay Chat) GUI API, called by rrc_client ---------
 
-    def add_rrc_hub(self, dest_hash, name=None, hops=None):
+    def add_rrc_hub(self, dest_hash, name=None, hops=None, fav=False):
         """Add or update a hub (RRC tab, called by rrc_client).
 
         Eviction is least-recently-SEEN, like add_shell_node(): FIFO drops
@@ -2123,12 +2298,12 @@ class UI:
         if entry is None:
             selected = (self._rrc_keys[self._rrc_idx]
                         if 0 <= self._rrc_idx < len(self._rrc_keys) else None)
-            entry = {"name": name, "hops": hops, "seen": time.time()}
+            entry = {"name": name, "hops": hops, "seen": time.time(), "fav": fav}
             self.rrc_hubs[dest_hash] = entry
             self._rrc_keys.append(dest_hash)
             while len(self._rrc_keys) > MAX_RRC_HUBS:
-                oldest = min(self._rrc_keys,
-                             key=lambda k: self.rrc_hubs[k].get("seen", 0))
+                oldest = min(filter(lambda k: not self.rrc_hubs[k].get("fav", False), self._rrc_keys),
+                             key=lambda k: self.rrc_hubs[k].get("seen", 0), default=None)
                 self.rrc_hubs.pop(oldest, None)
                 self._rrc_keys.remove(oldest)
             if selected is not None and selected in self._rrc_keys:
@@ -2144,11 +2319,14 @@ class UI:
             if hops is not None:
                 entry["hops"] = hops
             entry["seen"] = time.time()
+            if fav is True:
+                entry["fav"] = fav
         self.dirty = True
 
     def clear_rrc_hubs(self):
         self.rrc_hubs = {}
         self._rrc_keys = []
+        self._load_favorite("hub")
         self._rrc_idx = 0
         self._rrc_scroll = 0
         self.dirty = True
@@ -3933,6 +4111,7 @@ class UI:
         self.peers.clear()
         self._peer_keys.clear()
         self.chat_history.clear()
+        self._load_favorite("peer")
         # Media is keyed by message id, which nothing will reference again
         # once the history holding those ids is gone.
         self._image_cache.clear()
@@ -3957,14 +4136,15 @@ class UI:
                 cache.pop(k, None)
         self._image_cache_order = [ck for ck in self._image_cache_order if ck[0] != key]
 
-    def add_peer(self, dest_hash, name, rssi=None, hops=None, via=None):
+    def add_peer(self, dest_hash, name, rssi=None, hops=None, via=None, fav=False):
         """Add or update a peer from an announce."""
         if dest_hash not in self.peers and len(self.peers) >= MAX_PEERS:
             # Evict the least-recently-seen peer — never index 0, which
             # message-bubbling makes the most active chat.
             sel_key = (self._peer_keys[self.selected_idx]
                        if self.selected_idx < len(self._peer_keys) else None)
-            oldest = min(self._peer_keys, key=lambda k: self.peers[k].get("seen", 0))
+            oldest = min(filter(lambda k: not self.peers[k].get("fav", False), self._peer_keys),
+                         key=lambda k: self.peers[k].get("seen", 0), default=None)
             self._peer_keys.remove(oldest)
             del self.peers[oldest]
             self._forget_peer_state(oldest)
@@ -3975,9 +4155,10 @@ class UI:
                 self.selected_idx = self._peer_keys.index(sel_key)
             elif self.selected_idx >= len(self._peer_keys):
                 self.selected_idx = max(0, len(self._peer_keys) - 1)
-
+        if fav is False and dest_hash in self.peers:
+            fav = self.peers[dest_hash].get("fav")
         self.peers[dest_hash] = {"name": name or "?", "rssi": rssi,
-                                 "hops": hops, "via": via, "seen": time.time()}
+                                 "hops": hops, "via": via, "seen": time.time(), "fav": fav}
         if dest_hash not in self._peer_keys:
             self._peer_keys.append(dest_hash)
         self._route_cache = ''  # selected-peer footer may show new route info
@@ -3990,6 +4171,8 @@ class UI:
         if self.node_tab == TAB_MSG:
             if not (0 <= self.selected_idx < len(self._peer_keys)):
                 return
+            if self.peers[self._peer_keys[self.selected_idx]].get("fav") == True:
+                return # Don't delete favorites
             key = self._peer_keys.pop(self.selected_idx)
             self.peers.pop(key, None)
             self._forget_peer_state(key)
@@ -4007,6 +4190,8 @@ class UI:
         elif self.node_tab == TAB_NET:
             if not (0 <= self.net_idx < len(self._node_keys)):
                 return
+            if self.nomad_nodes[self._node_keys[self.net_idx]].get("fav") == True:
+                return # Don't delete favorites
             key = self._node_keys.pop(self.net_idx)
             self.nomad_nodes.pop(key, None)
             if self.net_idx >= len(self._node_keys):
@@ -4016,6 +4201,8 @@ class UI:
         elif self.node_tab == TAB_RRC:
             if not (0 <= self._rrc_idx < len(self._rrc_keys)):
                 return
+            if self.rrc_hubs[self._rrc_keys[self._rrc_idx]].get("fav") == True:
+                return # Don't delete favorites
             key = self._rrc_keys.pop(self._rrc_idx)
             self.rrc_hubs.pop(key, None)
             if self._rrc_idx >= len(self._rrc_keys):
@@ -4025,6 +4212,8 @@ class UI:
         else:  # TAB_SSH
             if not (0 <= self.ssh_idx < len(self._shell_keys)):
                 return
+            if self.shell_nodes[self._shell_keys[self.ssh_idx]].get("fav") == True:
+                return # Don't delete favorites
             key = self._shell_keys.pop(self.ssh_idx)
             self.shell_nodes.pop(key, None)
             if self.ssh_idx >= len(self._shell_keys):
@@ -4034,12 +4223,12 @@ class UI:
         self._cache = [''] * CACHE_ROWS
         self.dirty = True
 
-    def add_nomad_node(self, dest_hash, name, hops=None, seen=None):
+    def add_nomad_node(self, dest_hash, name, hops=None, seen=None, fav=False):
         """Add or update a NomadNet node (NET tab, called by nomad_browser)."""
         prev = self.nomad_nodes.get(dest_hash)
         if prev is None and len(self.nomad_nodes) >= MAX_PEERS:
-            oldest = min(self._node_keys,
-                         key=lambda k: self.nomad_nodes[k].get("seen", 0))
+            oldest = min(filter(lambda k: not self.nomad_nodes[k].get("fav", False), self._node_keys), 
+                         key=lambda k: self.nomad_nodes[k].get("seen", 0), default=None)
             del self.nomad_nodes[oldest]
             self._node_keys.remove(oldest)
             if self.net_idx >= len(self._node_keys):
@@ -4050,8 +4239,10 @@ class UI:
             # never let a stale storage seed overwrite a fresher announce
             if seen is not None and prev.get("seen", 0) > seen:
                 seen = prev["seen"]
+            if fav is False:
+                fav = prev["fav"]
         self.nomad_nodes[dest_hash] = {"name": name or "?", "hops": hops,
-                                       "seen": time.time() if seen is None else seen}
+                                       "seen": time.time() if seen is None else seen, "fav": fav}
         if dest_hash not in self._node_keys:
             self._node_keys.append(dest_hash)
         self._route_cache = ''
@@ -4061,6 +4252,7 @@ class UI:
         """Clear the NET tab (interface switch)."""
         self.nomad_nodes.clear()
         self._node_keys.clear()
+        self._load_favorite("node")
         self.net_idx = 0
         self.net_scroll = 0
         self._cache = [''] * CACHE_ROWS

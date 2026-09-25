@@ -1653,6 +1653,7 @@ def main():
     gc.threshold(1024 * 1024)
 
     _auto_connect_wifi()
+    gui.load_favorites()
 
     if DEBUG >= 1:
         print("Starting event loop...")
