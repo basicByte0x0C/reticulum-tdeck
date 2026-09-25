@@ -1150,7 +1150,7 @@ class UI:
                 self.tft.text(self.font, ")av", 15 * CHAR_W, INPUT_Y, self.DIM_CYAN, self.BG_DARK)
                 self.tft.text(self.font, "(", 19 * CHAR_W, INPUT_Y, self.DIM_CYAN, self.BG_DARK)
                 self.tft.text(self.font, "m", 20 * CHAR_W, INPUT_Y, self.NEON_GREEN, self.BG_DARK)
-                self.tft.text(self.font, ")hash  click=open", 21 * CHAR_W, INPUT_Y, self.DIM_CYAN, self.BG_DARK)
+                self.tft.text(self.font, ")hash", 21 * CHAR_W, INPUT_Y, self.DIM_CYAN, self.BG_DARK)
             self._route_cache = ''
 
         # Dynamic footer info, right-aligned in the last 14 cols (26-39),
@@ -2178,6 +2178,9 @@ class UI:
                                 BODY_Y + (BODY_ROWS - 2) * CHAR_H, self.DIM_CYAN)
             self._draw_row_cached(BODY_ROWS, self.my_identity_hash or "?",
                                 BODY_Y + (BODY_ROWS - 1) * CHAR_H, self.NEON_GREEN)
+        else:
+            self._draw_row_cached(BODY_ROWS - 1, '', BODY_Y + (BODY_ROWS - 2) * CHAR_H, self.NEON_CYAN)
+            self._draw_row_cached(BODY_ROWS, '', BODY_Y + (BODY_ROWS - 1) * CHAR_H, self.NEON_CYAN)
         self._draw_input_line(self._shell_hex.decode())
         foot = "Enter=connect  Esc=cancel"
         if self._cache[FOOT_SLOT] != foot:
