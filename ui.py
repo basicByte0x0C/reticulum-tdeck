@@ -1972,6 +1972,7 @@ class UI:
             self.chat_scroll = 0
             self.chat_cursor = -1
             self.cmd_buf = bytearray()
+            self._invalidate_chat_lines()
             self.state = STATE_CHAT
             self._state_change_ms = time.ticks_ms()
             self.dirty = True
@@ -4320,6 +4321,13 @@ class UI:
                     if self.selected_idx < self.node_scroll:
                         self.node_scroll = self.selected_idx
 
+        # The line cache outlives the chat screen: leaving a chat keeps it
+        # tagged with that peer, so a message arriving meanwhile (node list,
+        # recording, image viewer) must drop it or reopening shows stale lines.
+        if (self._chat_lines_peer == dest_hash
+                and not (self.state == STATE_CHAT and self.selected_peer == dest_hash)):
+            self._invalidate_chat_lines()
+
         if self.state == STATE_CHAT:
             if self.selected_peer == dest_hash:
                 # Snap to bottom for our own sends or when already at the
@@ -4357,8 +4365,9 @@ class UI:
             return  # aged out of history while the send was in flight
         old = hist[i]
         hist[i] = (old[0], old[1], old[2], status, old[4], old[5], old[6])
-        if self.state == STATE_CHAT and self.selected_peer == dest_hash:
+        if self._chat_lines_peer == dest_hash:
             self._invalidate_chat_lines()
+        if self.state == STATE_CHAT and self.selected_peer == dest_hash:
             for j in range(1, BODY_ROWS + 1):
                 self._cache[j] = ''
             self.dirty = True
